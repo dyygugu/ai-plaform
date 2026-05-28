@@ -1,0 +1,12 @@
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+pydantic-settings==2.7.1
+SQLAlchemy==2.0.36
+alembic==1.14.0
+psycopg[binary]==3.2.3
+redis==5.2.1
+python-multipart==0.0.20
+pytest==8.3.4
+openpyxl==3.1.5
+requests==2.32.3
+websocket-client==1.8.0

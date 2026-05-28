@@ -1,0 +1,18 @@
+{
+  "enabled": false,
+  "provider": "feishu-webhook",
+  "webhookUrl": "https://open.feishu.cn/open-apis/bot/v2/hook/REPLACE_ME",
+  "secret": "",
+  "minLevel": "warn",
+  "events": [
+    "backend.error",
+    "backend.unhandled_exception",
+    "audit.error",
+    "worker.error",
+    "alert.evaluation.failed",
+    "alert.evaluation.warning"
+  ],
+  "dryRun": false,
+  "cooldownSec": 300,
+  "note": "复制为 notifications.json 或用 AIDP_FEISHU_WEBHOOK_URL/AIDP_FEISHU_SECRET；敏感字段会脱敏。"
+}

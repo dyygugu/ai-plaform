@@ -1,0 +1,38 @@
+name: aidp-monitor-next
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: backend/Dockerfile
+    env_file:
+      - ../.env.example
+    environment:
+      AIDP_DATABASE_URL: sqlite+pysqlite:////app/data/aidp-monitor-next.db
+      AIDP_BACKUP_LOCAL_ROOT: /app/data/backups/local
+      AIDP_TASK_SAMPLE_ROOT: /app/data/redacted-samples
+      AIDP_PRODUCTION_STATE_PATH: /app/data/production-state.json
+      AIDP_PRODUCTION_AUTO_REFRESH_ENABLED: "true"
+      AIDP_PRODUCTION_AUTO_REFRESH_INTERVAL_MINUTES: "15"
+      AIDP_PRODUCTION_AUTO_REFRESH_INITIAL_DELAY_SECONDS: "30"
+      AIDP_SESSION_ACCOUNTS_PATH: /app/data/session-accounts.json
+      AIDP_PUBLIC_BASE_URL: http://127.0.0.1:8789
+      AIDP_TEMP_DRAFT_ALLOW_WRITE: "1"
+      AIDP_HOST_LAUNCHER_INTERNAL_URL: http://host.docker.internal:8790
+      AIDP_INCIDENT_AI_BASE_URL: ${AIDP_INCIDENT_AI_BASE_URL:-}
+      AIDP_INCIDENT_AI_API_KEY: ${AIDP_INCIDENT_AI_API_KEY:-}
+      AIDP_INCIDENT_AI_MODEL: ${AIDP_INCIDENT_AI_MODEL:-gpt-4.1-mini}
+      AIDP_INCIDENT_AI_TIMEOUT_SECONDS: ${AIDP_INCIDENT_AI_TIMEOUT_SECONDS:-30}
+      AIDP_AI_RUNTIME_CONFIG_PATH: /app/data/ai-runtime-config.json
+      AIDP_NOTIFICATION_CONFIG_PATH: /app/config/notifications.json
+      AIDP_FEISHU_WEBHOOK_URL: ${AIDP_FEISHU_WEBHOOK_URL:-}
+      AIDP_FEISHU_SECRET: ${AIDP_FEISHU_SECRET:-}
+      AIDP_NOTIFY_ENABLED: ${AIDP_NOTIFY_ENABLED:-false}
+      AIDP_NOTIFY_MIN_LEVEL: ${AIDP_NOTIFY_MIN_LEVEL:-warn}
+      AIDP_NOTIFY_DRY_RUN: ${AIDP_NOTIFY_DRY_RUN:-false}
+      AIDP_NOTIFY_COOLDOWN_SECONDS: ${AIDP_NOTIFY_COOLDOWN_SECONDS:-300}
+    ports:
+      - "8789:8787"
+    volumes:
+      - ../data:/app/data
+      - ../config:/app/config
