@@ -5,6 +5,7 @@ from typing import Any, Optional
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.paths import resolve_runtime_path
 from app.core.settings import get_settings
 from app.models.account import AccountStatus, AidpAccount
 from app.schemas.production import AccountRecycleActionResponse, DeletedProductionAccountRead
@@ -14,7 +15,7 @@ from app.services.task_rules import utc_now
 DELETED_ACCOUNTS_KEY = "deleted_accounts"
 
 
-def list_deleted_accounts() -> list[DeletedProductionAccountRead]:
+def list_deleted_accounts(db: Optional[Session] = None) -> list[DeletedProductionAccountRead]:
     seen: set[str] = set()
     items: list[DeletedProductionAccountRead] = []
     for store in (_load_store(_production_state_path()), _load_store(_session_accounts_path())):
@@ -24,6 +25,21 @@ def list_deleted_accounts() -> list[DeletedProductionAccountRead]:
                 continue
             seen.add(user_id)
             items.append(_deleted_read(account))
+    if db is not None:
+        for account in db.scalars(select(AidpAccount).where(AidpAccount.status == AccountStatus.DISABLED).order_by(AidpAccount.updated_at.desc(), AidpAccount.id.desc())):
+            if account.user_id in seen:
+                continue
+            seen.add(account.user_id)
+            items.append(
+                DeletedProductionAccountRead(
+                    user_id=account.user_id,
+                    display_name=account.display_name or account.user_id,
+                    deleted_at=account.updated_at.isoformat() if account.updated_at else None,
+                    delete_reason=account.last_error or "数据库中该账号已停用。",
+                    cookie_preserved=False,
+                    profile_preserved=False,
+                )
+            )
     return sorted(items, key=lambda item: item.deleted_at or "", reverse=True)
 
 
@@ -218,5 +234,4 @@ def _session_accounts_path() -> Path:
 
 
 def _resolve_path(value: str) -> Path:
-    path = Path(value)
-    return path if path.is_absolute() else Path.cwd() / path
+    return resolve_runtime_path(value)

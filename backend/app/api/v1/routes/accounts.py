@@ -89,8 +89,8 @@ def open_account_target(user_id: str, target: str, db: Session = Depends(get_db)
 
 
 @router.get("/deleted", response_model=list[DeletedProductionAccountRead])
-def read_deleted_accounts() -> list[DeletedProductionAccountRead]:
-    return list_deleted_accounts()
+def read_deleted_accounts(db: Session = Depends(get_db)) -> list[DeletedProductionAccountRead]:
+    return list_deleted_accounts(db)
 
 
 @router.post("/{user_id}/delete", response_model=AccountRecycleActionResponse)

@@ -8,6 +8,7 @@ import re
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.paths import resolve_runtime_path
 from app.core.settings import get_settings
 from app.models.account import AccountStatus, AidpAccount
 from app.schemas.account import AccountClientSessionRequest, AccountClientSessionResponse, AccountLoginSlotCreateRequest, AccountLoginSlotRead
@@ -19,10 +20,7 @@ def _now() -> datetime:
 
 
 def _resolve_data_path(value: str) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return Path.cwd() / path
+    return resolve_runtime_path(value)
 
 
 def _launcher_command() -> str:

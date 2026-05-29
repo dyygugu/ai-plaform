@@ -2,6 +2,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional
 
+from app.core.paths import resolve_runtime_path
 from app.core.settings import get_settings
 
 
@@ -43,10 +44,7 @@ def _load_json(path: Path) -> Any:
 
 
 def _resolve_path(value: str) -> Path:
-    path = Path(value)
-    if path.is_absolute():
-        return path
-    return Path.cwd() / path
+    return resolve_runtime_path(value)
 
 
 def _index_accounts(accounts: Any) -> dict[str, dict[str, Any]]:

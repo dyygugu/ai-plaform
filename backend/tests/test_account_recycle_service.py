@@ -125,3 +125,21 @@ def test_deleted_account_is_excluded_from_production_dashboard(tmp_path: Path, m
         get_settings.cache_clear()
 
     assert all(account.user_id != user_id for account in dashboard.accounts)
+
+
+def test_recycle_bin_includes_disabled_db_accounts_when_json_archive_is_missing(tmp_path: Path, monkeypatch) -> None:
+    state_path, session_path = _configure_paths(tmp_path, monkeypatch)
+    user_id = "123456789012"
+    state_path.write_text(json.dumps({"accounts": []}, ensure_ascii=False), encoding="utf-8")
+    session_path.write_text(json.dumps({"accounts": [], "deleted_accounts": []}, ensure_ascii=False), encoding="utf-8")
+    db = _session()
+    db.add(AidpAccount(user_id=user_id, display_name="用户123", status=AccountStatus.DISABLED, auth_mode="client-cookie"))
+    db.commit()
+
+    try:
+        deleted = list_deleted_accounts(db)
+    finally:
+        db.close()
+        get_settings.cache_clear()
+
+    assert [item.user_id for item in deleted] == [user_id]

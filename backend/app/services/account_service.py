@@ -1,21 +1,26 @@
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.paths import resolve_runtime_path
 from app.core.settings import get_settings
 from app.models.account import AccountStatus, AidpAccount
 from app.schemas.account import AccountMetadataRead, AccountMetadataUpdate
+from app.services.runtime_account_service import load_runtime_accounts
 
 
-def ensure_default_task_source_account(db: Session) -> AidpAccount:
+def ensure_default_task_source_account(db: Session) -> Optional[AidpAccount]:
     settings = get_settings()
-    account = db.scalar(select(AidpAccount).where(AidpAccount.user_id == settings.task_source_account_user_id))
+    task_source_user_id = str(settings.task_source_account_user_id or "").strip()
+    if not task_source_user_id:
+        return None
+    account = db.scalar(select(AidpAccount).where(AidpAccount.user_id == task_source_user_id))
     if account is None:
         account = AidpAccount(
-            user_id=settings.task_source_account_user_id,
+            user_id=task_source_user_id,
             display_name="主账号",
             status=AccountStatus.STALE,
             is_task_source=True,
@@ -31,7 +36,27 @@ def ensure_default_task_source_account(db: Session) -> AidpAccount:
 
 def list_accounts(db: Session) -> list[AidpAccount]:
     ensure_default_task_source_account(db)
+    _sync_runtime_accounts_to_db(db)
     return list(db.scalars(select(AidpAccount).order_by(AidpAccount.is_task_source.desc(), AidpAccount.user_id.asc())))
+
+
+def _sync_runtime_accounts_to_db(db: Session) -> None:
+    for user_id, runtime_account in load_runtime_accounts().items():
+        account = db.scalar(select(AidpAccount).where(AidpAccount.user_id == user_id))
+        display_name = _display_name(runtime_account, user_id)
+        auth_mode = str(runtime_account.get("authMode") or ("client-cookie" if runtime_account.get("cookie") or runtime_account.get("hasCookie") else "unknown"))
+        status = AccountStatus.ACTIVE if runtime_account.get("cookie") or runtime_account.get("hasCookie") or auth_mode == "client-cookie" else AccountStatus.STALE
+        if account is None:
+            db.add(AidpAccount(user_id=user_id, display_name=display_name, status=status, is_task_source=False, auth_mode=auth_mode))
+            continue
+        if account.status == AccountStatus.DISABLED:
+            continue
+        if display_name and (not account.display_name or account.display_name == account.user_id):
+            account.display_name = display_name
+        account.auth_mode = auth_mode
+        if status == AccountStatus.ACTIVE:
+            account.status = status
+    db.flush()
 
 
 def list_account_metadata() -> dict[str, dict[str, str]]:
@@ -86,6 +111,14 @@ def account_read_with_metadata(account: AidpAccount) -> dict[str, Any]:
     }
 
 
+def _display_name(account: dict[str, Any], fallback: str) -> str:
+    for key in ("authoritativeName", "name", "displayName", "customName"):
+        value = str(account.get(key) or "").strip()
+        if value:
+            return value
+    return fallback
+
+
 def _load_metadata() -> dict[str, Any]:
     path = _metadata_path()
     try:
@@ -105,5 +138,4 @@ def _write_metadata(data: dict[str, Any]) -> None:
 
 def _metadata_path() -> Path:
     value = get_settings().account_metadata_path
-    path = Path(value)
-    return path if path.is_absolute() else Path.cwd() / path
+    return resolve_runtime_path(value)

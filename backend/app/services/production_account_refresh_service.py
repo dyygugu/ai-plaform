@@ -7,6 +7,7 @@ from typing import Any, Callable, Optional
 import requests
 
 from app.core.settings import get_settings
+from app.core.paths import resolve_runtime_path
 from app.schemas.production import ProductionAccountRefreshItem, ProductionAccountRefreshResponse
 from app.services.earnings_ledger_service import update_earnings_ledger_from_accounts
 from app.services.runtime_account_service import load_runtime_accounts
@@ -484,8 +485,7 @@ def _request_json(kind: str, path: str, body: dict[str, Any], account: dict[str,
 
 
 def _production_state_path() -> Path:
-    path = Path(get_settings().production_state_path)
-    return path if path.is_absolute() else Path.cwd() / path
+    return resolve_runtime_path(get_settings().production_state_path)
 
 
 def _earnings_ledger_path_for_state(state_path: Optional[Path]) -> Optional[Path]:
