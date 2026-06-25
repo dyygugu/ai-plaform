@@ -11,6 +11,7 @@ services:
       AIDP_DATABASE_URL: sqlite+pysqlite:////app/data/aidp-monitor-next.db
       AIDP_BACKUP_LOCAL_ROOT: /app/data/backups/local
       AIDP_TASK_SAMPLE_ROOT: /app/data/redacted-samples
+      AIDP_LOCAL_AGENT_RELEASE_ROOT: /app/data/local-agent-releases
       AIDP_PRODUCTION_STATE_PATH: /app/data/production-state.json
       AIDP_PRODUCTION_AUTO_REFRESH_ENABLED: "true"
       AIDP_PRODUCTION_AUTO_REFRESH_INTERVAL_MINUTES: "15"

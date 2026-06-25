@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     backup_external_root: str = Field(default="/home/admin/aidp监控平台备份", alias="AIDP_BACKUP_EXTERNAL_ROOT")
     task_sample_root: str = Field(default="./data/redacted-samples", alias="AIDP_TASK_SAMPLE_ROOT")
     operation_recording_root: str = Field(default="./data/operation-recordings", alias="AIDP_OPERATION_RECORDING_ROOT")
+    local_agent_release_root: str = Field(default="./data/local-agent-releases", alias="AIDP_LOCAL_AGENT_RELEASE_ROOT")
     production_state_path: str = Field(default="./data/production-state.json", alias="AIDP_PRODUCTION_STATE_PATH")
     production_auto_refresh_enabled: bool = Field(default=False, alias="AIDP_PRODUCTION_AUTO_REFRESH_ENABLED")
     production_auto_refresh_interval_minutes: int = Field(default=15, alias="AIDP_PRODUCTION_AUTO_REFRESH_INTERVAL_MINUTES")

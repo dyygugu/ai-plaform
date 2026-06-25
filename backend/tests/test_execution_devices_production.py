@@ -9,6 +9,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api.v1.router import api_router
+from app.core.settings import get_settings
 from app.db.base import Base
 from app.db.session import get_db
 from app.models.worker import Worker, WorkerAccountTaskLease, WorkerCommand, WorkerEvent, WorkerEventType, WorkerLeaseStatus, WorkerStatus
@@ -271,3 +272,38 @@ def test_pause_stop_resume_routes() -> None:
         assert resumed.json()["status"] == "running_auto"
         assert stopped.status_code == 200
         assert stopped.json()["status"] == "stopped"
+
+
+def test_local_agent_suite_download_returns_zip_file(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        release_root = Path(tmp)
+        suite = release_root / "aidp-local-suite-0.9.0.zip"
+        suite.write_bytes(b"PK\x03\x04local-agent-suite")
+        monkeypatch.setenv("AIDP_LOCAL_AGENT_RELEASE_ROOT", str(release_root))
+        get_settings.cache_clear()
+        try:
+            with _api_client() as (client, _sessions):
+                latest = client.get("/api/v1/local-agent/releases/latest")
+                downloaded = client.get("/api/v1/local-agent/releases/latest/download-suite")
+        finally:
+            get_settings.cache_clear()
+
+    assert latest.status_code == 200
+    assert latest.json()["suite_name"] == suite.name
+    assert downloaded.status_code == 200
+    assert downloaded.headers["content-type"].startswith("application/zip")
+    assert "aidp-local-suite-0.9.0.zip" in downloaded.headers["content-disposition"]
+    assert downloaded.content.startswith(b"PK")
+
+
+def test_local_agent_suite_download_returns_404_when_file_missing(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        monkeypatch.setenv("AIDP_LOCAL_AGENT_RELEASE_ROOT", tmp)
+        get_settings.cache_clear()
+        try:
+            with _api_client() as (client, _sessions):
+                response = client.get("/api/v1/local-agent/releases/latest/download-suite")
+        finally:
+            get_settings.cache_clear()
+
+    assert response.status_code == 404
