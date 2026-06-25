@@ -63,3 +63,40 @@ def test_list_accounts_imports_runtime_accounts_when_database_has_no_accounts(tm
     assert account_ids == ["123456789012"]
     assert persisted is not None
     assert persisted_display_name == "用户123"
+
+
+def test_list_accounts_persists_runtime_accounts_without_caller_commit(tmp_path, monkeypatch) -> None:
+    state_path = tmp_path / "production-state.json"
+    session_path = tmp_path / "session-accounts.json"
+    db_path = tmp_path / "accounts.db"
+    state_path.write_text(
+        '{"accounts":[{"userId":"123456789099","name":"用户099","enabled":true,"authMode":"client-cookie","cookie":"redacted"}]}',
+        encoding="utf-8",
+    )
+    session_path.write_text('{"accounts":[]}', encoding="utf-8")
+    monkeypatch.setenv("AIDP_PRODUCTION_STATE_PATH", str(state_path))
+    monkeypatch.setenv("AIDP_SESSION_ACCOUNTS_PATH", str(session_path))
+    monkeypatch.setenv("AIDP_TASK_SOURCE_ACCOUNT_USER_ID", "")
+    get_settings.cache_clear()
+    engine = create_engine(f"sqlite+pysqlite:///{db_path}")
+    Base.metadata.create_all(engine)
+    Session = sessionmaker(bind=engine)
+    db = Session()
+
+    try:
+        accounts = account_service.list_accounts(db)
+        account_ids = [account.user_id for account in accounts]
+    finally:
+        db.close()
+
+    check_db = Session()
+    try:
+        persisted = check_db.query(AidpAccount).filter_by(user_id="123456789099").one_or_none()
+        persisted_display_name = persisted.display_name if persisted else None
+    finally:
+        check_db.close()
+        get_settings.cache_clear()
+
+    assert account_ids == ["123456789099"]
+    assert persisted is not None
+    assert persisted_display_name == "用户099"

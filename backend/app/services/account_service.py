@@ -13,10 +13,15 @@ from app.services.runtime_account_service import load_runtime_accounts
 
 
 def ensure_default_task_source_account(db: Session) -> Optional[AidpAccount]:
+    account, _changed = _ensure_default_task_source_account(db)
+    return account
+
+
+def _ensure_default_task_source_account(db: Session) -> tuple[Optional[AidpAccount], bool]:
     settings = get_settings()
     task_source_user_id = str(settings.task_source_account_user_id or "").strip()
     if not task_source_user_id:
-        return None
+        return None, False
     account = db.scalar(select(AidpAccount).where(AidpAccount.user_id == task_source_user_id))
     if account is None:
         account = AidpAccount(
@@ -28,19 +33,24 @@ def ensure_default_task_source_account(db: Session) -> Optional[AidpAccount]:
         )
         db.add(account)
         db.flush()
-    elif not account.is_task_source:
+        return account, True
+    if not account.is_task_source:
         account.is_task_source = True
         db.flush()
-    return account
+        return account, True
+    return account, False
 
 
 def list_accounts(db: Session) -> list[AidpAccount]:
-    ensure_default_task_source_account(db)
-    _sync_runtime_accounts_to_db(db)
+    _account, changed_default = _ensure_default_task_source_account(db)
+    changed_runtime = _sync_runtime_accounts_to_db(db)
+    if changed_default or changed_runtime:
+        db.commit()
     return list(db.scalars(select(AidpAccount).order_by(AidpAccount.is_task_source.desc(), AidpAccount.user_id.asc())))
 
 
-def _sync_runtime_accounts_to_db(db: Session) -> None:
+def _sync_runtime_accounts_to_db(db: Session) -> bool:
+    changed = False
     for user_id, runtime_account in load_runtime_accounts().items():
         account = db.scalar(select(AidpAccount).where(AidpAccount.user_id == user_id))
         display_name = _display_name(runtime_account, user_id)
@@ -48,15 +58,22 @@ def _sync_runtime_accounts_to_db(db: Session) -> None:
         status = AccountStatus.ACTIVE if runtime_account.get("cookie") or runtime_account.get("hasCookie") or auth_mode == "client-cookie" else AccountStatus.STALE
         if account is None:
             db.add(AidpAccount(user_id=user_id, display_name=display_name, status=status, is_task_source=False, auth_mode=auth_mode))
+            changed = True
             continue
         if account.status == AccountStatus.DISABLED:
             continue
         if display_name and (not account.display_name or account.display_name == account.user_id):
             account.display_name = display_name
-        account.auth_mode = auth_mode
-        if status == AccountStatus.ACTIVE:
+            changed = True
+        if account.auth_mode != auth_mode:
+            account.auth_mode = auth_mode
+            changed = True
+        if status == AccountStatus.ACTIVE and account.status != status:
             account.status = status
-    db.flush()
+            changed = True
+    if changed:
+        db.flush()
+    return changed
 
 
 def list_account_metadata() -> dict[str, dict[str, str]]:
