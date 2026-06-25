@@ -9,13 +9,13 @@ from fastapi.testclient import TestClient
 
 def account_fixtures() -> list[dict[str, object]]:
     return [
-        {"userId": "account-sample-001", "name": "用户样例001", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
-        {"userId": "account-sample-002", "name": "用户样例002", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
-        {"userId": "account-sample-003", "name": "用户样例003", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
-        {"userId": "account-sample-004", "name": "用户样例004", "enabled": True, "authMode": "client-cookie", "needsRelogin": True, "cookie": "redacted"},
-        {"userId": "account-sample-005", "name": "用户样例005", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
-        {"userId": "account-sample-006", "name": "用户样例006", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
-        {"userId": "account-sample-007", "name": "用户样例007", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
+        {"userId": "7635555555555555501", "name": "用户样例001", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
+        {"userId": "7635555555555555502", "name": "用户样例002", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
+        {"userId": "7635555555555555503", "name": "用户样例003", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
+        {"userId": "7635555555555555504", "name": "用户样例004", "enabled": True, "authMode": "client-cookie", "needsRelogin": True, "cookie": "redacted"},
+        {"userId": "7635555555555555505", "name": "用户样例005", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
+        {"userId": "7635555555555555506", "name": "用户样例006", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
+        {"userId": "7635555555555555507", "name": "用户样例007", "enabled": True, "authMode": "client-cookie", "cookie": "redacted"},
     ]
 
 
@@ -37,6 +37,11 @@ def configure_test_env(tmpdir: str) -> None:
     os.environ["AIDP_PRODUCTION_STATE_PATH"] = str(production_state_path)
     os.environ["AIDP_SESSION_ACCOUNTS_PATH"] = str(session_accounts_path)
     os.environ["AIDP_AI_RUNTIME_CONFIG_PATH"] = str(Path(tmpdir) / "ai-runtime-config.json")
+    os.environ["AIDP_NOTIFICATION_CONFIG_PATH"] = str(Path(tmpdir) / "notifications.json")
+    os.environ["AIDP_FEISHU_WEBHOOK_URL"] = ""
+    os.environ["AIDP_FEISHU_SECRET"] = ""
+    os.environ["AIDP_NOTIFY_ENABLED"] = "false"
+    os.environ["AIDP_NOTIFY_DRY_RUN"] = "false"
     os.environ["AIDP_PUBLIC_BASE_URL"] = "http://127.0.0.1:8789"
 
 
@@ -85,7 +90,7 @@ def main() -> None:
                 assert session.status_code == 200, session.text
             accounts = client.get("/api/v1/accounts")
             assert accounts.status_code == 200, accounts.text
-            assert accounts.json()[0]["user_id"] == "account-sample-002"
+            assert any(account["user_id"] == "7635555555555555502" for account in accounts.json())
             account_health = client.post("/api/v1/accounts/refresh-health")
             assert account_health.status_code == 200, account_health.text
             assert client.get("/api/v1/accounts/legacy-migration/preview").status_code == 404
@@ -120,7 +125,7 @@ def main() -> None:
             assert "RFT人标_" in rules.json()["prefix_rules"]
             update_rules = client.put("/api/v1/tasks/rules", json={"manual_short_names": {"7634515789236309806": "美观度人工简称"}})
             assert update_rules.status_code == 200, update_rules.text
-            task_source = client.put("/api/v1/settings/task-source", json={"task_source_account_user_id": "account-sample-002"})
+            task_source = client.put("/api/v1/settings/task-source", json={"task_source_account_user_id": "7635555555555555502"})
             assert task_source.status_code == 200, task_source.text
             refresh = client.post(
                 "/api/v1/tasks/catalog/refresh",
@@ -160,11 +165,11 @@ def main() -> None:
             heartbeat = client.post("/api/v1/workers/heartbeat", json={"worker_id": "test-worker", "version": "0.1.0"})
             assert heartbeat.status_code == 200, heartbeat.text
             assert heartbeat.json()["status"] == "online"
-            bind = client.post("/api/v1/workers/test-worker/bind-account", json={"account_user_id": "account-sample-002"})
+            bind = client.post("/api/v1/workers/test-worker/bind-account", json={"account_user_id": "7635555555555555502"})
             assert bind.status_code == 200, bind.text
             version = client.post("/api/v1/workers/test-worker/version", json={"target_version": "0.1.0-p7"})
             assert version.status_code == 200, version.text
-            claim = client.post("/api/v1/workers/test-worker/claim-task", json={"task_id": "7634515789236309806", "account_user_id": "account-sample-002"})
+            claim = client.post("/api/v1/workers/test-worker/claim-task", json={"task_id": "7634515789236309806", "account_user_id": "7635555555555555502"})
             assert claim.status_code == 200, claim.text
             event = client.post("/api/v1/workers/events", json={"worker_id": "test-worker", "event_type": "log_summary", "severity": "warning", "stage": "worker_runtime", "step": "log_summary", "message": "smoke log"})
             assert event.status_code == 200, event.text
@@ -472,9 +477,9 @@ def main() -> None:
             assert new_login_slot.status_code == 200, new_login_slot.text
             assert new_login_slot.json()["enabled"] is False
             assert new_login_slot.json()["pending_login"] is True
-            relogin_slot = client.post("/api/v1/accounts/account-sample-002/login-slots/relogin", json={})
+            relogin_slot = client.post("/api/v1/accounts/7635555555555555502/login-slots/relogin", json={})
             assert relogin_slot.status_code == 200, relogin_slot.text
-            assert relogin_slot.json()["user_id"] == "account-sample-002"
+            assert relogin_slot.json()["user_id"] == "7635555555555555502"
             rejected_session = client.post("/api/client-session", json={"userId": "pending", "cookie": "x", "referer": "https://aidp.juejin.cn/operation/task-v2"})
             assert rejected_session.status_code == 400, rejected_session.text
             registered_session = client.post("/api/client-session", json={"userId": "7635555555555555555", "name": "新登录账号", "cookie": "sessionid=redacted", "referer": "https://aidp.juejin.cn/operation/task-v2", "loginSessionId": new_login_slot.json()["login_session_id"], "cdpPort": new_login_slot.json()["cdp_port"]})

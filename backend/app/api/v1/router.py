@@ -1,11 +1,12 @@
 from fastapi import APIRouter
 
-from app.api.v1.routes import accounts, ai, ai_timer, alerts, audit, auto_answer_runs, auto_production, backups, bon8_production, data_quality, delivery, earnings, execution_devices, final_acceptance, freeze, health, incidents, inspection, local_agent, notifications, observability, operation_recordings, ops, restore_drills, roadmap_final, score_loop, settings, submitted_history, task_abilities, task_auto_runs, tasks, workers
+from app.api.v1.routes import accounts, ai, ai_timer, alerts, audit, auto_answer_runs, auto_production, backups, bon8_production, data_quality, delivery, earnings, execution_devices, final_acceptance, freeze, health, incidents, inspection, local_agent, notifications, observability, operation_recordings, ops, restore_drills, roadmap_final, rules, score_loop, settings, submitted_history, task_abilities, task_auto_runs, tasks, workers
 
 api_router = APIRouter()
 api_router.include_router(health.router)
 api_router.include_router(accounts.router)
 api_router.include_router(tasks.router)
+api_router.include_router(rules.router)
 api_router.include_router(settings.router)
 api_router.include_router(audit.router)
 api_router.include_router(backups.router)
