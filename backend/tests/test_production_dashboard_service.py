@@ -1,7 +1,8 @@
 import json
 
 from app.core.settings import get_settings
-from app.services.production_dashboard_service import _account_is_stale, _global_warning, _load_monitor_state, _task_stat, _warning
+from app.models.account import AccountStatus
+from app.services.production_dashboard_service import _account_is_stale, _global_warning, _load_monitor_state, _status, _task_stat, _warning
 
 
 def test_restored_account_with_successful_http_task_counts_is_not_stale() -> None:
@@ -41,6 +42,23 @@ def test_restored_account_with_successful_http_task_counts_is_not_stale() -> Non
     assert task.in_progress == 2
     assert task.pending == 0
     assert _warning("用户22449629285", source, stale) == ""
+
+
+def test_successful_refresh_clears_legacy_needs_relogin_for_dashboard_status() -> None:
+    source = {
+        "userId": "7633857103195918123",
+        "name": "用户612876981132",
+        "cookie": "sessionid=redacted",
+        "hasCookie": True,
+        "authMode": "client-cookie",
+        "needsRelogin": True,
+        "loginOk": True,
+        "refreshStatus": "ok",
+        "error": None,
+    }
+
+    assert _status(source, None) == AccountStatus.ACTIVE.value
+    assert "需要重新登录" not in _warning("用户612876981132", source, stale=False)
 
 
 def test_task_stat_keeps_processing_and_in_progress_separate() -> None:

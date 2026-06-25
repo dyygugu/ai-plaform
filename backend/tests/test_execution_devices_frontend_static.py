@@ -59,3 +59,13 @@ def test_production_control_drawer_static_contract() -> None:
     assert "startTaskProduction" in client
     assert "resumeAutoAnswerRun" in client
     assert "fetchExecutionDevicesForProduction" in client
+
+
+def test_account_task_open_preopens_window_before_async_request_for_chrome() -> None:
+    dashboard = _read("pages/DashboardPage.tsx")
+    accounts = _read("pages/AccountsPage.tsx")
+
+    assert dashboard.index('window.open("about:blank", "_blank")') < dashboard.index("await openAccountTarget")
+    assert accounts.index('window.open("about:blank", "_blank")') < accounts.index("await openAccountTarget")
+    assert "popup.location.replace(result.open_url)" in dashboard
+    assert "popup.location.replace(result.open_url)" in accounts

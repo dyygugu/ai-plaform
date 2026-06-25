@@ -1,4 +1,5 @@
 from typing import Optional
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
@@ -84,7 +85,9 @@ def open_account_target(user_id: str, target: str, db: Session = Depends(get_db)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     settings = get_settings()
-    open_url = f"{settings.host_launcher_url.rstrip('/')}/api/open-with-cookie?monitorUrl={settings.public_base_url.rstrip('/')}&token={session['token']}"
+    monitor_url = quote(settings.public_base_url.rstrip("/"), safe="")
+    token = quote(str(session["token"]), safe="")
+    open_url = f"{settings.host_launcher_url.rstrip('/')}/api/open-with-cookie?monitorUrl={monitor_url}&token={token}"
     return BrowserOpenTargetResponse(ok=True, user_id=user_id, target=target, open_url=open_url, message="已生成对应账号 Cookie 的打开链接，请用本机助手打开独立窗口。")
 
 

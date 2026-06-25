@@ -212,6 +212,7 @@ def _refresh_one_account(account: dict[str, Any], transport: Transport, display_
             "referer": referer,
             "operationUrl": referer,
             "loginOk": True,
+            "needsRelogin": False,
             "stale": False,
             "refreshStatus": "ok",
             "error": None,

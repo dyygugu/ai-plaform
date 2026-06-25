@@ -139,12 +139,19 @@ export function AccountsPage() {
   };
 
   const onOpenTarget = async (userId: string, target: "task" | "personal") => {
+    const popup = window.open("about:blank", "_blank");
+    if (popup) popup.opener = null;
     setActionLoading(`${target}-${userId}`);
     try {
       const result = await openAccountTarget(userId, target);
-      openLocalUrl(result.open_url);
+      if (popup) {
+        popup.location.replace(result.open_url);
+      } else {
+        openLocalUrl(result.open_url);
+      }
       message.success(result.message);
     } catch (error: unknown) {
+      popup?.close();
       message.error(safeError(error));
     } finally {
       setActionLoading(null);

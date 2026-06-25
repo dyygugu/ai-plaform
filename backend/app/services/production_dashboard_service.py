@@ -243,6 +243,8 @@ def _looks_like_real_user_name(value: str) -> bool:
 
 
 def _status(source: dict[str, Any], db_account: Optional[AidpAccount]) -> str:
+    if _has_successful_login_state(source):
+        return AccountStatus.ACTIVE.value
     if source.get("error") or source.get("needsRelogin"):
         return AccountStatus.NEEDS_LOGIN.value
     if source.get("cookie") or source.get("hasCookie") or str(source.get("authMode") or "") == "client-cookie":
@@ -254,6 +256,15 @@ def _status(source: dict[str, Any], db_account: Optional[AidpAccount]) -> str:
 
 def _status_label(status: str) -> str:
     return {"active": "已登录", "needs_login": "需重新登录", "stale": "待刷新", "disabled": "已停用"}.get(status, status)
+
+
+def _has_successful_login_state(source: dict[str, Any]) -> bool:
+    if source.get("error"):
+        return False
+    has_cookie = bool(source.get("cookie") or source.get("hasCookie") or str(source.get("authMode") or "") == "client-cookie")
+    if not has_cookie:
+        return False
+    return bool(source.get("loginOk") is True or source.get("refreshStatus") == "ok")
 
 
 def _auth_mode_label(value: str) -> str:
@@ -435,7 +446,7 @@ def _warning(display_name: str, source: dict[str, Any], stale: bool) -> str:
         warnings.append("未同步个人中心真实用户名")
     if stale:
         warnings.append("任务数字可能是旧缓存")
-    if source.get("needsRelogin"):
+    if source.get("needsRelogin") and not _has_successful_login_state(source):
         warnings.append("需要重新登录")
     return "；".join(warnings)
 

@@ -123,12 +123,19 @@ export function DashboardPage() {
   const withdrawableAmount = useMemo(() => accounts.reduce((total, account) => total + parseMoney(account.withdrawable_amount), 0), [accounts]);
 
   const openTarget = async (account: ProductionAccountCard, target: "task" | "personal") => {
+    const popup = window.open("about:blank", "_blank");
+    if (popup) popup.opener = null;
     setActionLoading(`${target}-${account.user_id}`);
     try {
       const result = await openAccountTarget(account.user_id, target);
-      window.open(result.open_url, "_blank", "noopener,noreferrer");
+      if (popup) {
+        popup.location.replace(result.open_url);
+      } else {
+        window.open(result.open_url, "_blank", "noopener,noreferrer");
+      }
       message.success(result.message);
     } catch (error: unknown) {
+      popup?.close();
       message.error(safeError(error));
     } finally {
       setActionLoading(null);
