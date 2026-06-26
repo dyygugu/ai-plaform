@@ -3,7 +3,7 @@ param(
   [string]$HelperSourceRoot = '',
   [string]$ExtensionSourceRoot = '',
   [string]$OutputRoot = '',
-  [string]$PlatformBaseUrl = 'http://127.0.0.1:8789'
+  [string]$PlatformBaseUrl = 'http://192.168.10.149:8789'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -91,8 +91,44 @@ try {
     Write-Utf8File -Path (Join-Path $localAgentRoot 'README.md') -Content "# AIDP Local Agent`n`n启动 local-agent/host-launcher.ps1。`n"
   }
 
+  $platformUrls = @(
+    [ordered]@{
+      id = 'local-dev'
+      name = '本地开发地址'
+      url = 'http://127.0.0.1:8789'
+      is_builtin = $true
+    },
+    [ordered]@{
+      id = 'nas-lan'
+      name = 'NAS 局域网地址'
+      url = 'http://192.168.10.149:8789'
+      is_builtin = $true
+    },
+    [ordered]@{
+      id = 'public-domain'
+      name = '公网访问地址'
+      url = 'https://platform.51gugu.uk'
+      is_builtin = $true
+    }
+  )
+  $normalizedPlatformBaseUrl = ([string]$PlatformBaseUrl).Trim().TrimEnd('/')
+  $activePlatformUrl = @($platformUrls | Where-Object { ([string]$_['url']).TrimEnd('/') -eq $normalizedPlatformBaseUrl } | Select-Object -First 1)[0]
+  if ($activePlatformUrl) {
+    $activePlatformUrlId = [string]$activePlatformUrl['id']
+  } else {
+    $activePlatformUrlId = 'custom-default'
+    $platformUrls += ,[ordered]@{
+      id = $activePlatformUrlId
+      name = '自定义默认地址'
+      url = $normalizedPlatformBaseUrl
+      is_builtin = $false
+    }
+  }
+
   $defaultConfig = [ordered]@{
-    platform_base_url = $PlatformBaseUrl
+    platform_base_url = $normalizedPlatformBaseUrl
+    active_platform_url_id = $activePlatformUrlId
+    platform_urls = @($platformUrls)
     agent_port = 8790
     worker_runtime_enabled = $true
     plugin_bridge_enabled = $true

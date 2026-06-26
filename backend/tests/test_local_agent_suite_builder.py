@@ -65,8 +65,31 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
             assert "install/uninstall.ps1" in names
             assert "install/README.md" in names
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
+            default_config = json.loads(archive.read("local-agent/config/default-config.json").decode("utf-8"))
 
     assert manifest["suite_version"] == "0.9.0"
     assert manifest["local_agent"]["entry"] == "local-agent/host-launcher.ps1"
     assert manifest["browser_extension"]["path"] == "browser-extension/aidp-score-helper-0.9.0.zip"
     assert manifest["install"]["entry"] == "install/install.ps1"
+    assert default_config["platform_base_url"] == "http://192.168.10.149:8789"
+    assert default_config["active_platform_url_id"] == "nas-lan"
+    assert default_config["platform_urls"] == [
+        {
+            "id": "local-dev",
+            "name": "本地开发地址",
+            "url": "http://127.0.0.1:8789",
+            "is_builtin": True,
+        },
+        {
+            "id": "nas-lan",
+            "name": "NAS 局域网地址",
+            "url": "http://192.168.10.149:8789",
+            "is_builtin": True,
+        },
+        {
+            "id": "public-domain",
+            "name": "公网访问地址",
+            "url": "https://platform.51gugu.uk",
+            "is_builtin": True,
+        },
+    ]
