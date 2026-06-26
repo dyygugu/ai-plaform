@@ -124,7 +124,9 @@ export interface ExecutionDeviceListResponse { items: ExecutionDeviceItem[]; tot
 export interface ExecutionDeviceSummaryResponse { total: number; online: number; running: number; pending_approval: number; abnormal: number; update_needed: number; }
 export interface ExecutionDeviceDeleteResponse { worker_id: string; deleted: boolean; message: string; }
 export interface DeletedExecutionDevice { worker_id: string; device_name: string; status_label: string; deleted_at: string | null; delete_reason: string; last_seen_at: string | null; }
-export interface LocalAgentReleaseRead { version: string; suite_name: string; message: string; }
+export interface LocalAgentReleasePackageRead { package_name: string; download_url: string; sha256: string; size_bytes: number; }
+export interface LocalAgentComponentReleaseRead { version: string; download_url: string; sha256: string; size_bytes: number; }
+export interface LocalAgentReleaseRead { version: string; suite_name: string; message: string; suite_version: string; suite: LocalAgentReleasePackageRead; local_agent: LocalAgentComponentReleaseRead; browser_extension: LocalAgentComponentReleaseRead; release_notes: string[]; mandatory: boolean; }
 export interface AutoProductionStatusResponse { production_allowed: boolean; ability_version: string; prompt_version: string; selected_learning_package_id: string; missing_requirements: string[]; current_run: Record<string, unknown> | null; available_account_count: number; available_device_count: number; message: string; }
 export interface StartProductionPayload { account_scope: { mode: "all_available" | "specified"; account_user_ids: string[] }; question_scope: { mode: "pending" | "repair" | "pending_repair" }; execution_mode: "platform" | "platform_plus_devices" | "devices"; device_scope: { mode: "auto" | "specified"; worker_ids: string[] }; limits: { max_items_total: number | null; failure_threshold: number }; }
 export interface WorkerEventStageContract { stage: string; steps: string[]; }

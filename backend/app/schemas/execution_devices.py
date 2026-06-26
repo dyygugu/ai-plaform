@@ -69,7 +69,36 @@ class ExecutionDeviceApproveRequest(BaseModel):
     manual_slots: int = Field(default=1, ge=1)
 
 
+class LocalAgentReleasePackageRead(BaseModel):
+    package_name: str
+    download_url: str
+    sha256: str = ""
+    size_bytes: int = 0
+
+
+class LocalAgentComponentReleaseRead(BaseModel):
+    version: str = "0.9.0"
+    download_url: str
+    sha256: str = ""
+    size_bytes: int = 0
+
+
 class LocalAgentReleaseRead(BaseModel):
     version: str = "0.9.0"
     suite_name: str = "aidp-local-suite-0.9.0.zip"
     message: str = "本机助手套件下载入口已就绪。"
+    suite_version: str = "0.9.0"
+    suite: LocalAgentReleasePackageRead = Field(
+        default_factory=lambda: LocalAgentReleasePackageRead(
+            package_name="aidp-local-suite-0.9.0.zip",
+            download_url="/api/v1/local-agent/releases/latest/download-suite",
+        )
+    )
+    local_agent: LocalAgentComponentReleaseRead = Field(
+        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-agent")
+    )
+    browser_extension: LocalAgentComponentReleaseRead = Field(
+        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-extension")
+    )
+    release_notes: list[str] = Field(default_factory=list)
+    mandatory: bool = False
