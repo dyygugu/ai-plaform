@@ -5,7 +5,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 $OutputEncoding = New-Object System.Text.UTF8Encoding($false)
-$script:HelperVersion = '0.9.0'
+$script:HelperVersion = '0.9.1'
 $script:HelperStartedAt = (Get-Date).ToUniversalTime().AddHours(8).ToString('s')
 $script:InjectedProfilePorts = @{}
 $script:HelperLogs = @()
@@ -512,19 +512,19 @@ function Get-AssistantConsoleHtml {
   <title>本机助手控制台</title>
   <style>
     :root {
-      --bg: #f4f6f0;
-      --panel: #fffdf6;
-      --panel-2: #eef4e8;
-      --ink: #1f2a21;
-      --muted: #687369;
-      --line: #d7dfd1;
+      --bg: #f8fbff;
+      --panel: rgba(255, 255, 255, 0.72);
+      --panel-2: rgba(244, 248, 255, 0.72);
+      --ink: #172033;
+      --muted: #647084;
+      --line: rgba(148, 163, 184, 0.26);
       --green: #1f8a4c;
-      --blue: #2667a8;
-      --yellow: #a76f00;
+      --blue: #3f7ee8;
+      --yellow: #b57416;
       --red: #b42318;
-      --gray: #69716a;
-      --shadow: 0 18px 45px rgba(50, 63, 44, .12);
-      --radius: 18px;
+      --gray: #677389;
+      --shadow: 0 20px 60px rgba(15, 23, 42, 0.12);
+      --radius: 24px;
     }
     * { box-sizing: border-box; }
     body {
@@ -532,25 +532,25 @@ function Get-AssistantConsoleHtml {
       font-family: "Microsoft YaHei", "PingFang SC", "Noto Sans CJK SC", sans-serif;
       color: var(--ink);
       background:
-        radial-gradient(circle at 8% 12%, rgba(121, 169, 109, .28), transparent 30%),
-        radial-gradient(circle at 92% 18%, rgba(64, 128, 171, .18), transparent 28%),
-        linear-gradient(135deg, #f7f3e8 0%, #eff5e7 55%, #edf3f7 100%);
+        radial-gradient(circle at 8% 12%, rgba(111, 165, 255, .26), transparent 30%),
+        radial-gradient(circle at 92% 18%, rgba(172, 211, 255, .35), transparent 28%),
+        linear-gradient(135deg, #f8fbff 0%, #eef4ff 100%);
       min-height: 100vh;
     }
     button, input { font: inherit; }
     button {
       border: 0;
-      border-radius: 999px;
+      border-radius: 12px;
       padding: 9px 14px;
-      background: #24442e;
+      background: linear-gradient(135deg, #4f8cff 0%, #6aa7ff 100%);
       color: #fff;
       cursor: pointer;
       transition: background .18s ease, box-shadow .18s ease, transform .18s ease;
     }
-    button:hover { background: #16321f; box-shadow: 0 10px 24px rgba(36, 68, 46, .18); }
+    button:hover { background: linear-gradient(135deg, #3f7ee8 0%, #5a96ef 100%); box-shadow: 0 10px 24px rgba(79, 140, 255, .2); }
     button:active { transform: translateY(1px); }
-    button.secondary { background: #e8eee2; color: var(--ink); }
-    button.secondary:hover { background: #dce6d6; }
+    button.secondary { background: rgba(255, 255, 255, 0.72); color: var(--ink); border: 1px solid rgba(148, 163, 184, 0.35); }
+    button.secondary:hover { background: rgba(255, 255, 255, 0.9); }
     button.warning { background: #9d6014; }
     button.danger { background: #b42318; }
     button:disabled { background: #c8cec5; color: #71786f; cursor: not-allowed; box-shadow: none; }
@@ -559,11 +559,11 @@ function Get-AssistantConsoleHtml {
       border: 1px solid var(--line);
       border-radius: 14px;
       padding: 10px 12px;
-      background: rgba(255,255,255,.85);
+      background: rgba(255, 255, 255, 0.72);
       color: var(--ink);
       outline: none;
     }
-    input[type="text"]:focus, input[type="url"]:focus { border-color: #6e9962; box-shadow: 0 0 0 3px rgba(110,153,98,.18); }
+    input[type="text"]:focus, input[type="url"]:focus { border-color: #6aa7ff; box-shadow: 0 0 0 3px rgba(79,140,255,.18); }
     .shell {
       display: grid;
       grid-template-columns: 246px minmax(0, 1fr);
@@ -571,9 +571,9 @@ function Get-AssistantConsoleHtml {
     }
     .sidebar {
       padding: 22px 16px;
-      border-right: 1px solid rgba(102, 120, 93, .25);
-      background: rgba(255, 253, 246, .76);
-      backdrop-filter: blur(12px);
+      border-right: 1px solid rgba(148, 163, 184, .22);
+      background: rgba(255, 255, 255, 0.62);
+      backdrop-filter: blur(22px);
       position: sticky;
       top: 0;
       height: 100vh;
@@ -581,13 +581,15 @@ function Get-AssistantConsoleHtml {
     .brand {
       padding: 14px 14px 18px;
       border-radius: 22px;
-      background: #24442e;
+      background: rgba(255, 255, 255, 0.72);
+      backdrop-filter: blur(22px);
+      border: 1px solid rgba(255, 255, 255, 0.7);
       color: white;
-      box-shadow: var(--shadow);
+      box-shadow: 0 20px 60px rgba(15, 23, 42, 0.12);
       margin-bottom: 18px;
     }
-    .brand h1 { margin: 0 0 8px; font-size: 20px; letter-spacing: .02em; }
-    .brand p { margin: 0; color: rgba(255,255,255,.76); line-height: 1.55; font-size: 13px; }
+    .brand h1 { margin: 0 0 8px; font-size: 20px; letter-spacing: .02em; color: var(--ink); }
+    .brand p { margin: 0; color: var(--muted); line-height: 1.55; font-size: 13px; }
     .nav { display: grid; gap: 6px; }
     .nav button {
       width: 100%;
@@ -598,7 +600,7 @@ function Get-AssistantConsoleHtml {
       box-shadow: none;
       padding: 11px 12px;
     }
-    .nav button:hover, .nav button.active { background: #dfead7; }
+    .nav button:hover, .nav button.active { background: rgba(255, 255, 255, 0.72); box-shadow: 0 10px 28px rgba(15, 23, 42, .08); }
     .main { padding: 24px; }
     .topbar {
       display: flex;
@@ -611,9 +613,10 @@ function Get-AssistantConsoleHtml {
     .title p { margin: 8px 0 0; color: var(--muted); }
     .actions { display: flex; gap: 10px; flex-wrap: wrap; justify-content: flex-end; }
     .panel {
-      background: rgba(255, 253, 246, .86);
-      border: 1px solid rgba(114, 132, 103, .22);
-      border-radius: var(--radius);
+      background: rgba(255, 255, 255, 0.72);
+      backdrop-filter: blur(22px);
+      border: 1px solid rgba(255, 255, 255, 0.7);
+      border-radius: 24px;
       box-shadow: var(--shadow);
       padding: 18px;
       margin-bottom: 16px;
@@ -622,8 +625,11 @@ function Get-AssistantConsoleHtml {
     .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); }
     .card {
       border: 1px solid var(--line);
-      background: rgba(255,255,255,.66);
-      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.68);
+      backdrop-filter: blur(18px);
+      border: 1px solid rgba(255, 255, 255, 0.75);
+      border-radius: 20px;
+      box-shadow: 0 12px 32px rgba(15, 23, 42, 0.08);
       padding: 15px;
       min-height: 138px;
     }
@@ -1696,7 +1702,18 @@ function Get-AutostartSettings {
 function Get-AutostartShortcutPath {
   $startup = [Environment]::GetFolderPath([Environment+SpecialFolder]::Startup)
   if (-not $startup) { return '' }
-  Join-Path $startup 'AIDP Local Helper.cmd'
+  Join-Path $startup 'AIDP 本机助手.cmd'
+}
+
+function Get-WindowsLauncherPath {
+  $candidates = @(
+    (Join-Path (Split-Path -Parent $PSScriptRoot) 'AIDP 本机助手.exe'),
+    (Join-Path $PSScriptRoot 'AIDP 本机助手.exe')
+  )
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+  }
+  return ''
 }
 
 function Sync-AutostartRegistration {
@@ -1705,10 +1722,16 @@ function Sync-AutostartRegistration {
   if (-not $shortcutPath) { return [ordered]@{ ok = $false; message = '当前系统没有可用的开机启动目录。'; shortcut_path = '' } }
   try {
     if ([bool](Get-MapValue $Settings 'enabled')) {
-      $startScript = Join-Path $PSScriptRoot 'start-local-agent.ps1'
-      if (-not (Test-Path -LiteralPath $startScript)) { $startScript = Join-Path $PSScriptRoot 'host-launcher.ps1' }
       $windowArg = if ([bool](Get-MapValue $Settings 'start_minimized')) { '/min ' } else { '' }
-      $content = "@echo off`r`nstart $windowArg`"AIDP Local Helper`" pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$startScript`"`r`n"
+      $launcherPath = Get-WindowsLauncherPath
+      if ($launcherPath) {
+        $minimizedArg = if ([bool](Get-MapValue $Settings 'start_minimized')) { ' --minimized' } else { '' }
+        $content = "@echo off`r`nstart $windowArg`"AIDP 本机助手`" `"$launcherPath`"$minimizedArg`r`n"
+      } else {
+        $startScript = Join-Path $PSScriptRoot 'start-local-agent.ps1'
+        if (-not (Test-Path -LiteralPath $startScript)) { $startScript = Join-Path $PSScriptRoot 'host-launcher.ps1' }
+        $content = "@echo off`r`nstart $windowArg`"AIDP 本机助手`" pwsh.exe -NoLogo -NoProfile -ExecutionPolicy Bypass -File `"$startScript`"`r`n"
+      }
       [System.IO.File]::WriteAllText($shortcutPath, $content, (New-Utf8NoBomEncoding))
     } elseif (Test-Path -LiteralPath $shortcutPath) {
       Remove-Item -LiteralPath $shortcutPath -Force

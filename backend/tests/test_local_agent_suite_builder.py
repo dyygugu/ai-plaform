@@ -33,7 +33,7 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
                 "-File",
                 str(script),
                 "-Version",
-                "0.9.0",
+                "0.9.1",
                 "-HelperSourceRoot",
                 str(helper_root),
                 "-ExtensionSourceRoot",
@@ -49,28 +49,35 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
         )
 
         assert result.returncode == 0, result.stderr + result.stdout
-        suite = output_root / "aidp-local-suite-0.9.0.zip"
+        suite = output_root / "aidp-local-suite-0.9.1.zip"
         assert suite.is_file()
         with zipfile.ZipFile(suite) as archive:
             names = set(archive.namelist())
             assert "manifest.json" in names
+            assert "AIDP 本机助手.exe" in names
             assert "local-agent/host-launcher.ps1" in names
             assert "local-agent/start-local-agent.ps1" in names
             assert "local-agent/apply-update.ps1" in names
             assert "local-agent/config/default-config.json" in names
             assert "local-agent/README.md" in names
-            assert "browser-extension/aidp-score-helper-0.9.0.zip" in names
+            assert "browser-extension/aidp-score-helper-0.9.1.zip" in names
             assert "browser-extension/README.md" in names
             assert "install/install.ps1" in names
             assert "install/uninstall.ps1" in names
             assert "install/README.md" in names
+            assert archive.read("AIDP 本机助手.exe").startswith(b"MZ")
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
             default_config = json.loads(archive.read("local-agent/config/default-config.json").decode("utf-8"))
+            install_script = archive.read("install/install.ps1").decode("utf-8")
 
-    assert manifest["suite_version"] == "0.9.0"
+    assert manifest["suite_version"] == "0.9.1"
     assert manifest["local_agent"]["entry"] == "local-agent/host-launcher.ps1"
-    assert manifest["browser_extension"]["path"] == "browser-extension/aidp-score-helper-0.9.0.zip"
+    assert manifest["windows_launcher"]["path"] == "AIDP 本机助手.exe"
+    assert manifest["windows_launcher"]["tray"] is True
+    assert manifest["windows_launcher"]["single_instance"] is True
+    assert manifest["browser_extension"]["path"] == "browser-extension/aidp-score-helper-0.9.1.zip"
     assert manifest["install"]["entry"] == "install/install.ps1"
+    assert "AIDP 本机助手.exe" in install_script
     assert default_config["platform_base_url"] == "http://192.168.10.149:8789"
     assert default_config["active_platform_url_id"] == "nas-lan"
     assert default_config["platform_urls"] == [
@@ -93,3 +100,30 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
             "is_builtin": True,
         },
     ]
+
+
+def test_windows_launcher_source_exposes_p0_tray_behaviour() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = repo_root / "local-agent-launcher" / "AidpLocalHelperLauncher.cs"
+
+    text = source.read_text(encoding="utf-8")
+
+    for token in [
+        "new Mutex(",
+        "NotifyIcon",
+        "打开控制台",
+        "测试平台连接",
+        "重启本机助手",
+        "开启开机自启动",
+        "关闭开机自启动",
+        "退出本机助手",
+        "/api/worker-runtime/stop",
+        "/api/assistant/test-platform-connection",
+        "/api/assistant/check-updates",
+        "AIDP 本机助手.cmd",
+        "--exit",
+        "Win32_Process",
+        "KillLauncherProcessesInAppRoot",
+        "netstat",
+    ]:
+        assert token in text

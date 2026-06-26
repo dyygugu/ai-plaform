@@ -80,8 +80,20 @@ def test_local_helper_exposes_chinese_console_routes_and_safe_copy() -> None:
         "一键诊断",
         "导出诊断包",
         "已发现新版，但当前正在执行任务。系统会等空闲后再更新",
+        "启动后最小化运行",
+        "启动后自动连接平台",
+        "启动后自动开启执行能力",
     ]:
         assert label in text
+
+    for liquid_glass_token in [
+        "linear-gradient(135deg, #f8fbff 0%, #eef4ff 100%)",
+        "backdrop-filter: blur(22px)",
+        "rgba(255, 255, 255, 0.72)",
+        "border-radius: 24px",
+        "box-shadow: 0 20px 60px rgba(15, 23, 42, 0.12)",
+    ]:
+        assert liquid_glass_token in text
 
     for route in [
         "/api/assistant/autostart",

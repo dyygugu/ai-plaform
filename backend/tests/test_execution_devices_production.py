@@ -277,7 +277,7 @@ def test_pause_stop_resume_routes() -> None:
 def test_local_agent_suite_download_returns_zip_file(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         release_root = Path(tmp)
-        suite = release_root / "aidp-local-suite-0.9.0.zip"
+        suite = release_root / "aidp-local-suite-0.9.1.zip"
         suite.write_bytes(b"PK\x03\x04local-agent-suite")
         monkeypatch.setenv("AIDP_LOCAL_AGENT_RELEASE_ROOT", str(release_root))
         get_settings.cache_clear()
@@ -292,7 +292,7 @@ def test_local_agent_suite_download_returns_zip_file(monkeypatch) -> None:
     assert latest.json()["suite_name"] == suite.name
     assert downloaded.status_code == 200
     assert downloaded.headers["content-type"].startswith("application/zip")
-    assert "aidp-local-suite-0.9.0.zip" in downloaded.headers["content-disposition"]
+    assert "aidp-local-suite-0.9.1.zip" in downloaded.headers["content-disposition"]
     assert downloaded.content.startswith(b"PK")
 
 

@@ -34,9 +34,9 @@ def _sha256(path: Path) -> str:
 def test_latest_release_manifest_exposes_packages_hashes_and_download_urls(monkeypatch) -> None:
     with tempfile.TemporaryDirectory() as tmp:
         release_root = Path(tmp)
-        suite = release_root / "aidp-local-suite-0.9.0.zip"
+        suite = release_root / "aidp-local-suite-0.9.1.zip"
         agent = release_root / "aidp-local-helper.zip"
-        extension = release_root / "aidp-score-helper-0.9.0.zip"
+        extension = release_root / "aidp-score-helper-0.9.1.zip"
         _write_zip_stub(suite, b"suite")
         _write_zip_stub(agent, b"agent")
         _write_zip_stub(extension, b"extension")
@@ -51,18 +51,21 @@ def test_latest_release_manifest_exposes_packages_hashes_and_download_urls(monke
 
     assert response.status_code == 200
     payload = response.json()
-    assert payload["suite_version"] == "0.9.0"
-    assert payload["version"] == "0.9.0"
-    assert payload["suite_name"] == "aidp-local-suite-0.9.0.zip"
+    assert payload["suite_version"] == "0.9.1"
+    assert payload["version"] == "0.9.1"
+    assert payload["suite_name"] == "aidp-local-suite-0.9.1.zip"
     assert payload["suite"] == {
-        "package_name": "aidp-local-suite-0.9.0.zip",
+        "package_name": "aidp-local-suite-0.9.1.zip",
         "download_url": "/api/v1/local-agent/releases/latest/download-suite",
         "sha256": suite_sha256,
         "size_bytes": suite_size,
     }
     assert payload["local_agent"]["download_url"] == "/api/v1/local-agent/releases/latest/download-agent"
     assert payload["local_agent"]["sha256"] == agent_sha256
-    assert payload["browser_extension"]["version"] == "0.9.0"
+    assert payload["windows_launcher"]["version"] == "0.9.1"
+    assert payload["windows_launcher"]["download_url"] == "/api/v1/local-agent/releases/latest/download-suite"
+    assert payload["windows_launcher"]["sha256"] == suite_sha256
+    assert payload["browser_extension"]["version"] == "0.9.1"
     assert payload["browser_extension"]["download_url"] == "/api/v1/local-agent/releases/latest/download-extension"
     assert payload["browser_extension"]["sha256"] == extension_sha256
     assert payload["release_notes"] == []

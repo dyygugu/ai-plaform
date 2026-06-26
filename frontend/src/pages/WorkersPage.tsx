@@ -235,9 +235,9 @@ export function WorkersPage() {
 
       <Card title="本机助手套件">
         <Descriptions bordered size="small" column={3}>
-          <Descriptions.Item label="套件名称">{release?.suite_name ?? "aidp-local-suite-0.9.0.zip"}</Descriptions.Item>
-          <Descriptions.Item label="推荐版本">{release?.version ?? "0.9.0"}</Descriptions.Item>
-          <Descriptions.Item label="本机助手版本">{release?.version ?? "-"}</Descriptions.Item>
+          <Descriptions.Item label="套件名称">{release?.suite_name ?? "aidp-local-suite-0.9.1.zip"}</Descriptions.Item>
+          <Descriptions.Item label="推荐版本">{release?.version ?? "0.9.1"}</Descriptions.Item>
+          <Descriptions.Item label="本机助手版本">{release?.windows_launcher?.version ?? release?.version ?? "-"}</Descriptions.Item>
           <Descriptions.Item label="插件版本">{release?.version ?? "-"}</Descriptions.Item>
           <Descriptions.Item label="平台地址">/api/v1</Descriptions.Item>
           <Descriptions.Item label="连接状态"><Tag color="green">已连接</Tag></Descriptions.Item>

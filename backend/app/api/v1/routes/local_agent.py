@@ -10,7 +10,7 @@ from app.schemas.execution_devices import LocalAgentComponentReleaseRead, LocalA
 
 router = APIRouter(prefix="/local-agent", tags=["local-agent"])
 
-LOCAL_AGENT_VERSION = "0.9.0"
+LOCAL_AGENT_VERSION = "0.9.1"
 DEFAULT_SUITE_NAME = f"aidp-local-suite-{LOCAL_AGENT_VERSION}.zip"
 DEFAULT_AGENT_NAME = "aidp-local-helper.zip"
 DEFAULT_EXTENSION_NAME = f"aidp-score-helper-{LOCAL_AGENT_VERSION}.zip"
@@ -106,6 +106,12 @@ def read_local_agent_latest_release() -> LocalAgentReleaseRead:
             download_url="/api/v1/local-agent/releases/latest/download-agent",
             sha256=_file_sha256(agent),
             size_bytes=_file_size(agent),
+        ),
+        windows_launcher=LocalAgentComponentReleaseRead(
+            version=suite_version,
+            download_url="/api/v1/local-agent/releases/latest/download-suite",
+            sha256=_file_sha256(suite),
+            size_bytes=_file_size(suite),
         ),
         browser_extension=LocalAgentComponentReleaseRead(
             version=_release_version_from_extension(extension),

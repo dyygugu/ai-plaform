@@ -1,6 +1,7 @@
 param(
-  [string]$Version = '0.9.0',
+  [string]$Version = '0.9.1',
   [string]$HelperSourceRoot = '',
+  [string]$LauncherSourcePath = '',
   [string]$ExtensionSourceRoot = '',
   [string]$OutputRoot = '',
   [string]$PlatformBaseUrl = 'http://192.168.10.149:8789'
@@ -55,6 +56,48 @@ function New-ZipFromDirectory {
   }
 }
 
+function Get-CSharpCompilerPath {
+  $candidates = @(
+    (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
+    (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+  )
+  foreach ($candidate in $candidates) {
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+  }
+  $command = Get-Command csc.exe -ErrorAction SilentlyContinue
+  if ($command -and $command.Source) { return $command.Source }
+  throw '未找到 C# 编译器 csc.exe，无法生成 AIDP 本机助手.exe。'
+}
+
+function Build-WindowsLauncher {
+  param([string]$Source, [string]$Destination)
+  if (-not (Test-Path -LiteralPath $Source)) {
+    throw "Windows launcher source not found: $Source"
+  }
+  $parent = Split-Path -Parent $Destination
+  if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  }
+  $csc = Get-CSharpCompilerPath
+  $args = @(
+    '/nologo',
+    '/target:winexe',
+    '/platform:anycpu',
+    '/optimize+',
+    '/codepage:65001',
+    '/reference:System.dll',
+    '/reference:System.Drawing.dll',
+    '/reference:System.Management.dll',
+    '/reference:System.Windows.Forms.dll',
+    ('/out:' + $Destination),
+    $Source
+  )
+  & $csc @args
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $Destination)) {
+    throw "Failed to compile Windows launcher: $Source"
+  }
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $projectsRoot = Split-Path -Parent $repoRoot
 if (-not $HelperSourceRoot) {
@@ -68,11 +111,15 @@ if (-not $HelperSourceRoot) {
 if (-not $ExtensionSourceRoot) {
   $ExtensionSourceRoot = Join-Path $projectsRoot 'aidp-monitor\browser-extension\aidp-score-helper'
 }
+if (-not $LauncherSourcePath) {
+  $LauncherSourcePath = Join-Path $repoRoot 'local-agent-launcher\AidpLocalHelperLauncher.cs'
+}
 if (-not $OutputRoot) {
   $OutputRoot = Join-Path $repoRoot 'data\local-agent\releases\packages'
 }
 
 $helperRoot = (Resolve-Path -LiteralPath $HelperSourceRoot).Path
+$launcherSource = (Resolve-Path -LiteralPath $LauncherSourcePath).Path
 $extensionRoot = (Resolve-Path -LiteralPath $ExtensionSourceRoot).Path
 if (-not (Test-Path -LiteralPath $OutputRoot)) {
   New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
@@ -87,6 +134,10 @@ $installRoot = Join-Path $stagingRoot 'install'
 
 try {
   New-Item -ItemType Directory -Force -Path $localAgentRoot, $extensionStageRoot, $installRoot | Out-Null
+
+  $launcherExeName = 'AIDP 本机助手.exe'
+  $launcherExePath = Join-Path $stagingRoot $launcherExeName
+  Build-WindowsLauncher -Source $launcherSource -Destination $launcherExePath
 
   Copy-RequiredFile -Source (Join-Path $helperRoot 'host-launcher.ps1') -Destination (Join-Path $localAgentRoot 'host-launcher.ps1')
   $helperReadme = Join-Path $helperRoot 'README.md'
@@ -202,15 +253,20 @@ $ErrorActionPreference = 'Stop'
 $suiteRoot = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
 $sourceAgent = Join-Path $suiteRoot 'local-agent'
 $sourceExtension = Join-Path $suiteRoot 'browser-extension'
+$sourceLauncher = Join-Path $suiteRoot 'AIDP 本机助手.exe'
 New-Item -ItemType Directory -Force -Path $InstallRoot | Out-Null
-Copy-Item -LiteralPath (Join-Path $sourceAgent '*') -Destination $InstallRoot -Recurse -Force
+$agentTarget = Join-Path $InstallRoot 'local-agent'
+New-Item -ItemType Directory -Force -Path $agentTarget | Out-Null
+Copy-Item -LiteralPath (Join-Path $sourceAgent '*') -Destination $agentTarget -Recurse -Force
+Copy-Item -LiteralPath $sourceLauncher -Destination (Join-Path $InstallRoot 'AIDP 本机助手.exe') -Force
+Copy-Item -LiteralPath (Join-Path $suiteRoot 'manifest.json') -Destination (Join-Path $InstallRoot 'manifest.json') -Force
 $extensionTarget = Join-Path $InstallRoot 'browser-extension'
 New-Item -ItemType Directory -Force -Path $extensionTarget | Out-Null
 Copy-Item -LiteralPath (Join-Path $sourceExtension '*') -Destination $extensionTarget -Recurse -Force
 [ordered]@{
   ok = $true
   install_root = $InstallRoot
-  start_command = "pwsh.exe -ExecutionPolicy Bypass -File `"$InstallRoot\start-local-agent.ps1`""
+  start_command = "`"$InstallRoot\AIDP 本机助手.exe`""
   message = '本机助手已安装；插件包已复制到 browser-extension 目录，请按 README 手动更新浏览器插件。'
 } | ConvertTo-Json -Depth 10
 '@
@@ -245,7 +301,7 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
 ## 启动
 
 ```powershell
-pwsh.exe -ExecutionPolicy Bypass -File `"`$env:LOCALAPPDATA\AIDP\local-agent\start-local-agent.ps1`"
+& "`$env:LOCALAPPDATA\AIDP\local-agent\AIDP 本机助手.exe"
 ```
 
 ## 插件
@@ -257,6 +313,13 @@ pwsh.exe -ExecutionPolicy Bypass -File `"`$env:LOCALAPPDATA\AIDP\local-agent\sta
   $manifest = [ordered]@{
     suite_version = $Version
     generated_at = (Get-Date).ToUniversalTime().ToString('o')
+    windows_launcher = [ordered]@{
+      version = $Version
+      path = $launcherExeName
+      tray = $true
+      single_instance = $true
+      autostart_entry = 'AIDP 本机助手.cmd'
+    }
     local_agent = [ordered]@{
       version = $Version
       path = 'local-agent/'

@@ -77,25 +77,28 @@ class LocalAgentReleasePackageRead(BaseModel):
 
 
 class LocalAgentComponentReleaseRead(BaseModel):
-    version: str = "0.9.0"
+    version: str = "0.9.1"
     download_url: str
     sha256: str = ""
     size_bytes: int = 0
 
 
 class LocalAgentReleaseRead(BaseModel):
-    version: str = "0.9.0"
-    suite_name: str = "aidp-local-suite-0.9.0.zip"
+    version: str = "0.9.1"
+    suite_name: str = "aidp-local-suite-0.9.1.zip"
     message: str = "本机助手套件下载入口已就绪。"
-    suite_version: str = "0.9.0"
+    suite_version: str = "0.9.1"
     suite: LocalAgentReleasePackageRead = Field(
         default_factory=lambda: LocalAgentReleasePackageRead(
-            package_name="aidp-local-suite-0.9.0.zip",
+            package_name="aidp-local-suite-0.9.1.zip",
             download_url="/api/v1/local-agent/releases/latest/download-suite",
         )
     )
     local_agent: LocalAgentComponentReleaseRead = Field(
         default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-agent")
+    )
+    windows_launcher: LocalAgentComponentReleaseRead = Field(
+        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-suite")
     )
     browser_extension: LocalAgentComponentReleaseRead = Field(
         default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-extension")
