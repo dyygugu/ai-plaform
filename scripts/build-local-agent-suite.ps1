@@ -5,7 +5,10 @@ param(
   [string]$InstallerSourcePath = '',
   [string]$ExtensionSourceRoot = '',
   [string]$OutputRoot = '',
-  [string]$PlatformBaseUrl = 'http://192.168.10.149:8789'
+  [string]$PlatformBaseUrl = 'http://192.168.10.149:8789',
+  [string]$CodeSigningCertSubject = 'CN=AIDP Local Helper Code Signing',
+  [switch]$TrustCodeSigningCertificate,
+  [switch]$SkipCodeSigning
 )
 
 $ErrorActionPreference = 'Stop'
@@ -151,6 +154,112 @@ function Build-WindowsInstaller {
   }
 }
 
+function Get-OrCreate-CodeSigningCertificate {
+  param([string]$Subject)
+  $now = Get-Date
+  $cert = @(Get-ChildItem -Path Cert:\CurrentUser\My -CodeSigningCert -ErrorAction SilentlyContinue |
+    Where-Object { $_.Subject -eq $Subject -and $_.HasPrivateKey -and $_.NotAfter -gt $now.AddDays(30) } |
+    Sort-Object NotAfter -Descending |
+    Select-Object -First 1)[0]
+  if (-not $cert) {
+    $cert = New-SelfSignedCertificate `
+      -Type CodeSigningCert `
+      -Subject $Subject `
+      -FriendlyName 'AIDP Local Helper Code Signing' `
+      -CertStoreLocation Cert:\CurrentUser\My `
+      -KeyAlgorithm RSA `
+      -KeyLength 3072 `
+      -HashAlgorithm SHA256 `
+      -KeyUsage DigitalSignature `
+      -NotAfter $now.AddYears(5)
+  }
+  $cert
+}
+
+function Trust-CodeSigningCertificate {
+  param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+  $rootStorePath = 'Cert:\CurrentUser\Root'
+  $publisherStorePath = 'Cert:\CurrentUser\TrustedPublisher'
+  Add-CodeSigningCertificateToStore -Certificate $Certificate -StoreName 'Root' -StorePath $rootStorePath
+  Add-CodeSigningCertificateToStore -Certificate $Certificate -StoreName 'TrustedPublisher' -StorePath $publisherStorePath
+}
+
+function Add-CodeSigningCertificateToStore {
+  param(
+    [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate,
+    [string]$StoreName,
+    [string]$StorePath
+  )
+  $store = [System.Security.Cryptography.X509Certificates.X509Store]::new($StoreName, [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+  try {
+    $store.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadWrite)
+    $exists = $false
+    foreach ($item in @($store.Certificates)) {
+      if ($item.Thumbprint -eq $Certificate.Thumbprint) {
+        $exists = $true
+        break
+      }
+    }
+    if (-not $exists) {
+      $store.Add($Certificate)
+    }
+  } catch {
+    throw "Failed to add code signing certificate to ${StorePath}: $($_.Exception.Message)"
+  } finally {
+    $store.Close()
+  }
+}
+
+function Export-CodeSigningCertificate {
+  param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate, [string]$Destination)
+  $parent = Split-Path -Parent $Destination
+  if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  }
+  Export-Certificate -Cert $Certificate -FilePath $Destination -Force | Out-Null
+}
+
+function Test-CodeSigningCertificateTrusted {
+  param([System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+  $rootStore = [System.Security.Cryptography.X509Certificates.X509Store]::new('Root', [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+  $publisherStore = [System.Security.Cryptography.X509Certificates.X509Store]::new('TrustedPublisher', [System.Security.Cryptography.X509Certificates.StoreLocation]::CurrentUser)
+  try {
+    $rootStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+    $publisherStore.Open([System.Security.Cryptography.X509Certificates.OpenFlags]::ReadOnly)
+    $rootTrusted = $false
+    foreach ($item in @($rootStore.Certificates)) {
+      if ($item.Thumbprint -eq $Certificate.Thumbprint) {
+        $rootTrusted = $true
+        break
+      }
+    }
+    $publisherTrusted = $false
+    foreach ($item in @($publisherStore.Certificates)) {
+      if ($item.Thumbprint -eq $Certificate.Thumbprint) {
+        $publisherTrusted = $true
+        break
+      }
+    }
+    return ($rootTrusted -and $publisherTrusted)
+  } finally {
+    $rootStore.Close()
+    $publisherStore.Close()
+  }
+}
+
+function Sign-WindowsBinary {
+  param([string]$Path, [System.Security.Cryptography.X509Certificates.X509Certificate2]$Certificate)
+  if (-not (Test-Path -LiteralPath $Path)) {
+    throw "Cannot sign missing file: $Path"
+  }
+  Set-AuthenticodeSignature -FilePath $Path -Certificate $Certificate -HashAlgorithm SHA256 | Out-Null
+  $verify = Get-AuthenticodeSignature -FilePath $Path
+  if (-not $verify.SignerCertificate) {
+    throw "Failed to sign Windows binary: $Path; status=$($verify.Status); message=$($verify.StatusMessage)"
+  }
+  $verify
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $projectsRoot = Split-Path -Parent $repoRoot
 if (-not $HelperSourceRoot) {
@@ -192,9 +301,23 @@ $installRoot = Join-Path $stagingRoot 'install'
 try {
   New-Item -ItemType Directory -Force -Path $localAgentRoot, $extensionStageRoot, $installRoot | Out-Null
 
+  $codeSigningCert = $null
+  $codeSigningCertRelativePath = 'code-signing/AIDP-Local-Helper-CodeSigning.cer'
+  if (-not $SkipCodeSigning) {
+    $codeSigningCert = Get-OrCreate-CodeSigningCertificate -Subject $CodeSigningCertSubject
+    if ($TrustCodeSigningCertificate) {
+      Trust-CodeSigningCertificate -Certificate $codeSigningCert
+    }
+    Export-CodeSigningCertificate -Certificate $codeSigningCert -Destination (Join-Path $stagingRoot $codeSigningCertRelativePath)
+  }
+
   $launcherExeName = 'AIDP 本机助手.exe'
   $launcherExePath = Join-Path $stagingRoot $launcherExeName
   Build-WindowsLauncher -Source $launcherSource -Destination $launcherExePath
+  $launcherSignature = $null
+  if ($codeSigningCert) {
+    $launcherSignature = Sign-WindowsBinary -Path $launcherExePath -Certificate $codeSigningCert
+  }
 
   Copy-RequiredFile -Source (Join-Path $helperRoot 'host-launcher.ps1') -Destination (Join-Path $localAgentRoot 'host-launcher.ps1')
   $helperReadme = Join-Path $helperRoot 'README.md'
@@ -379,9 +502,19 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
   $manifest = [ordered]@{
     suite_version = $Version
     generated_at = (Get-Date).ToUniversalTime().ToString('o')
+    code_signing = [ordered]@{
+      mode = if ($codeSigningCert) { 'self_signed_internal' } else { 'unsigned' }
+      subject = if ($codeSigningCert) { [string]$codeSigningCert.Subject } else { '' }
+      thumbprint = if ($codeSigningCert) { [string]$codeSigningCert.Thumbprint } else { '' }
+      certificate_path = if ($codeSigningCert) { $codeSigningCertRelativePath } else { '' }
+      trusted_current_user = if ($codeSigningCert) { [bool](Test-CodeSigningCertificateTrusted -Certificate $codeSigningCert) } else { $false }
+      trust_parameter = 'TrustCodeSigningCertificate'
+    }
     windows_launcher = [ordered]@{
       version = $Version
       path = $launcherExeName
+      signed = [bool]$codeSigningCert
+      signature_status = if ($launcherSignature) { [string]$launcherSignature.Status } else { 'Unsigned' }
       tray = $true
       single_instance = $true
       autostart_entry = 'AIDP 本机助手.cmd'
@@ -389,6 +522,7 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
     windows_installer = [ordered]@{
       version = $Version
       path = $installerExeName
+      signed = [bool]$codeSigningCert
       embedded_suite = $true
       supports_uninstall = $true
       creates_desktop_shortcut = $true
@@ -416,6 +550,10 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
 
   $installerPath = Join-Path $outputRootResolved $installerExeName
   Build-WindowsInstaller -Source $installerSource -Destination $installerPath -PayloadZip $payloadSuitePath
+  $installerSignature = $null
+  if ($codeSigningCert) {
+    $installerSignature = Sign-WindowsBinary -Path $installerPath -Certificate $codeSigningCert
+  }
   Copy-RequiredFile -Source $installerPath -Destination (Join-Path $stagingRoot $installerExeName)
 
   $suitePath = Join-Path $outputRootResolved "aidp-local-suite-$Version.zip"

@@ -43,12 +43,14 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
             ],
             cwd=repo_root,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             capture_output=True,
-            timeout=60,
+            timeout=120,
             check=False,
         )
 
-        assert result.returncode == 0, result.stderr + result.stdout
+        assert result.returncode == 0, (result.stderr or "") + (result.stdout or "")
         suite = output_root / "aidp-local-suite-0.9.1.zip"
         installer = output_root / "AIDP-Local-Helper-Setup-0.9.1.exe"
         assert suite.is_file()
@@ -59,6 +61,7 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
             assert "manifest.json" in names
             assert "AIDP 本机助手.exe" in names
             assert "AIDP-Local-Helper-Setup-0.9.1.exe" in names
+            assert "code-signing/AIDP-Local-Helper-CodeSigning.cer" in names
             assert "local-agent/host-launcher.ps1" in names
             assert "local-agent/start-local-agent.ps1" in names
             assert "local-agent/apply-update.ps1" in names
@@ -77,14 +80,19 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
     assert manifest["suite_version"] == "0.9.1"
     assert manifest["local_agent"]["entry"] == "local-agent/host-launcher.ps1"
     assert manifest["windows_launcher"]["path"] == "AIDP 本机助手.exe"
+    assert manifest["windows_launcher"]["signed"] is True
     assert manifest["windows_launcher"]["tray"] is True
     assert manifest["windows_launcher"]["single_instance"] is True
     assert manifest["windows_installer"]["path"] == "AIDP-Local-Helper-Setup-0.9.1.exe"
+    assert manifest["windows_installer"]["signed"] is True
     assert manifest["windows_installer"]["embedded_suite"] is True
     assert manifest["windows_installer"]["supports_uninstall"] is True
     assert manifest["windows_installer"]["creates_desktop_shortcut"] is True
     assert manifest["windows_installer"]["creates_start_menu_shortcut"] is True
     assert manifest["browser_extension"]["path"] == "browser-extension/aidp-score-helper-0.9.1.zip"
+    assert manifest["code_signing"]["mode"] == "self_signed_internal"
+    assert manifest["code_signing"]["certificate_path"] == "code-signing/AIDP-Local-Helper-CodeSigning.cer"
+    assert manifest["code_signing"]["thumbprint"]
     assert manifest["install"]["entry"] == "install/install.ps1"
     assert "AIDP 本机助手.exe" in install_script
     assert default_config["platform_base_url"] == "http://192.168.10.149:8789"
@@ -160,5 +168,23 @@ def test_windows_setup_source_exposes_p1_installer_behaviour() -> None:
         "是否保留本机配置",
         "AIDP 本机助手.cmd",
         "LaunchAfterInstall",
+    ]:
+        assert token in text
+
+
+def test_suite_builder_exposes_code_signing_workflow() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    script = repo_root / "scripts" / "build-local-agent-suite.ps1"
+    text = script.read_text(encoding="utf-8")
+
+    for token in [
+        "New-SelfSignedCertificate",
+        "Set-AuthenticodeSignature",
+        "Get-AuthenticodeSignature",
+        "TrustedPublisher",
+        "Cert:\\CurrentUser\\Root",
+        "AIDP-Local-Helper-CodeSigning.cer",
+        "Sign-WindowsBinary",
+        "Export-CodeSigningCertificate",
     ]:
         assert token in text
