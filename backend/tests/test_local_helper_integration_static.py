@@ -8,6 +8,17 @@ def _legacy_root() -> Path:
     return Path(__file__).resolve().parents[3] / "aidp-monitor"
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[2]
+
+
+def _helper_source() -> Path:
+    tracked_helper = _repo_root() / "local-agent-source" / "host-launcher.ps1"
+    if tracked_helper.is_file():
+        return tracked_helper
+    return _legacy_root() / "tools" / "local-helper-package" / "host-launcher.ps1"
+
+
 def test_browser_extension_only_connects_to_local_helper() -> None:
     extension_root = _legacy_root() / "browser-extension" / "aidp-score-helper"
     if not extension_root.is_dir():
@@ -22,7 +33,7 @@ def test_browser_extension_only_connects_to_local_helper() -> None:
 
 
 def test_local_helper_exposes_worker_runtime_and_update_status_routes() -> None:
-    helper = _legacy_root() / "tools" / "local-helper-package" / "host-launcher.ps1"
+    helper = _helper_source()
     if not helper.is_file():
         pytest.skip(f"legacy helper source is not available: {helper}")
     text = helper.read_text(encoding="utf-8")
@@ -44,7 +55,7 @@ def test_local_helper_exposes_worker_runtime_and_update_status_routes() -> None:
 
 
 def test_local_helper_exposes_chinese_console_routes_and_safe_copy() -> None:
-    helper = _legacy_root() / "tools" / "local-helper-package" / "host-launcher.ps1"
+    helper = _helper_source()
     if not helper.is_file():
         pytest.skip(f"legacy helper source is not available: {helper}")
     text = helper.read_text(encoding="utf-8")
@@ -101,7 +112,7 @@ def test_local_helper_exposes_chinese_console_routes_and_safe_copy() -> None:
 
 
 def test_local_helper_defaults_to_editable_nas_platform_urls() -> None:
-    helper = _legacy_root() / "tools" / "local-helper-package" / "host-launcher.ps1"
+    helper = _helper_source()
     if not helper.is_file():
         pytest.skip(f"legacy helper source is not available: {helper}")
     text = helper.read_text(encoding="utf-8")
@@ -123,3 +134,11 @@ def test_local_helper_defaults_to_editable_nas_platform_urls() -> None:
     assert "Normalize-AssistantSettings -Settings $defaults" in text
     assert "$Settings.PSObject.Properties['Keys']" in text
     assert "$fallbackSettings = @{" in text
+
+
+def test_suite_builder_prefers_tracked_local_agent_source() -> None:
+    script = _repo_root() / "scripts" / "build-local-agent-suite.ps1"
+    text = script.read_text(encoding="utf-8")
+
+    assert "local-agent-source" in text
+    assert "Join-Path $repoRoot 'local-agent-source'" in text

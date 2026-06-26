@@ -58,7 +58,12 @@ function New-ZipFromDirectory {
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $projectsRoot = Split-Path -Parent $repoRoot
 if (-not $HelperSourceRoot) {
-  $HelperSourceRoot = Join-Path $projectsRoot 'aidp-monitor\tools\local-helper-package'
+  $repoHelperSourceRoot = Join-Path $repoRoot 'local-agent-source'
+  if (Test-Path -LiteralPath (Join-Path $repoHelperSourceRoot 'host-launcher.ps1')) {
+    $HelperSourceRoot = $repoHelperSourceRoot
+  } else {
+    $HelperSourceRoot = Join-Path $projectsRoot 'aidp-monitor\tools\local-helper-package'
+  }
 }
 if (-not $ExtensionSourceRoot) {
   $ExtensionSourceRoot = Join-Path $projectsRoot 'aidp-monitor\browser-extension\aidp-score-helper'
