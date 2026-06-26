@@ -8,6 +8,7 @@ import {
   checkExecutionDeviceUpdates,
   deleteExecutionDevice,
   disableExecutionDevice,
+  downloadLocalAgentInstaller,
   downloadLocalAgentSuite,
   fetchDeletedExecutionDevices,
   fetchExecutionDeviceSummary,
@@ -238,12 +239,14 @@ export function WorkersPage() {
           <Descriptions.Item label="套件名称">{release?.suite_name ?? "aidp-local-suite-0.9.1.zip"}</Descriptions.Item>
           <Descriptions.Item label="推荐版本">{release?.version ?? "0.9.1"}</Descriptions.Item>
           <Descriptions.Item label="本机助手版本">{release?.windows_launcher?.version ?? release?.version ?? "-"}</Descriptions.Item>
+          <Descriptions.Item label="安装包版本">{release?.windows_installer?.version ?? release?.version ?? "-"}</Descriptions.Item>
           <Descriptions.Item label="插件版本">{release?.version ?? "-"}</Descriptions.Item>
           <Descriptions.Item label="平台地址">/api/v1</Descriptions.Item>
           <Descriptions.Item label="连接状态"><Tag color="green">已连接</Tag></Descriptions.Item>
           <Descriptions.Item label="更新状态"><Tag color="blue">已最新</Tag></Descriptions.Item>
         </Descriptions>
         <Space wrap style={{ marginTop: 16 }}>
+          <Button type="primary" onClick={downloadLocalAgentInstaller}>下载安装包</Button>
           <Button type="primary" onClick={downloadLocalAgentSuite}>下载套件</Button>
           <Button href="/docs/local-agent" target="_blank">安装说明</Button>
           <Button onClick={() => selectedIds.length ? void runDeviceAction(async () => { await Promise.all(selectedIds.map(checkExecutionDeviceUpdates)); }, "已批量检查更新") : void load()}>检查更新</Button>

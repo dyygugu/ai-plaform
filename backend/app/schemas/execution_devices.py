@@ -100,6 +100,9 @@ class LocalAgentReleaseRead(BaseModel):
     windows_launcher: LocalAgentComponentReleaseRead = Field(
         default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-suite")
     )
+    windows_installer: LocalAgentComponentReleaseRead = Field(
+        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-installer")
+    )
     browser_extension: LocalAgentComponentReleaseRead = Field(
         default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-extension")
     )

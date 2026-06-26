@@ -60,6 +60,7 @@ namespace Aidp.LocalHelperLauncher
         private readonly System.Windows.Forms.Timer statusTimer;
         private Process helperProcess;
         private bool exiting;
+        private bool recovering;
 
         public LauncherContext(string[] args)
         {
@@ -143,6 +144,20 @@ namespace Aidp.LocalHelperLauncher
             platformStatusItem.Text = healthy ? "平台连接请在控制台查看" : "平台连接不可检测";
             enableAutostartItem.Enabled = !LauncherOperations.IsAutostartEnabled();
             disableAutostartItem.Enabled = LauncherOperations.IsAutostartEnabled();
+
+            if (!healthy && !exiting && !recovering)
+            {
+                recovering = true;
+                try
+                {
+                    helperStatusItem.Text = "正在恢复本机助手";
+                    EnsureHelperStarted();
+                }
+                finally
+                {
+                    recovering = false;
+                }
+            }
         }
 
         private void TestPlatformConnection()

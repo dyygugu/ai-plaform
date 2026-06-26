@@ -2,6 +2,7 @@ param(
   [string]$Version = '0.9.1',
   [string]$HelperSourceRoot = '',
   [string]$LauncherSourcePath = '',
+  [string]$InstallerSourcePath = '',
   [string]$ExtensionSourceRoot = '',
   [string]$OutputRoot = '',
   [string]$PlatformBaseUrl = 'http://192.168.10.149:8789'
@@ -98,6 +99,58 @@ function Build-WindowsLauncher {
   }
 }
 
+function Build-WindowsInstaller {
+  param([string]$Source, [string]$Destination, [string]$PayloadZip)
+  if (-not (Test-Path -LiteralPath $Source)) {
+    throw "Windows installer source not found: $Source"
+  }
+  if (-not (Test-Path -LiteralPath $PayloadZip)) {
+    throw "Windows installer payload not found: $PayloadZip"
+  }
+  $parent = Split-Path -Parent $Destination
+  if ($parent -and -not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Force -Path $parent | Out-Null
+  }
+  $baseExe = Join-Path $parent ('setup-base-' + [Guid]::NewGuid().ToString('N') + '.exe')
+  $csc = Get-CSharpCompilerPath
+  $args = @(
+    '/nologo',
+    '/target:winexe',
+    '/platform:anycpu',
+    '/optimize+',
+    '/codepage:65001',
+    '/reference:System.dll',
+    '/reference:System.Drawing.dll',
+    '/reference:System.Windows.Forms.dll',
+    '/reference:System.IO.Compression.dll',
+    '/reference:System.IO.Compression.FileSystem.dll',
+    ('/out:' + $baseExe),
+    $Source
+  )
+  & $csc @args
+  if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $baseExe)) {
+    throw "Failed to compile Windows installer: $Source"
+  }
+
+  $marker = [System.Text.Encoding]::ASCII.GetBytes('AIDP_SETUP_PAYLOAD_V1')
+  $payload = [System.IO.File]::ReadAllBytes($PayloadZip)
+  $lengthBytes = [System.BitConverter]::GetBytes([Int64]$payload.Length)
+  $base = [System.IO.File]::ReadAllBytes($baseExe)
+  $stream = [System.IO.File]::Open($Destination, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+  try {
+    $stream.Write($base, 0, $base.Length)
+    $stream.Write($payload, 0, $payload.Length)
+    $stream.Write($marker, 0, $marker.Length)
+    $stream.Write($lengthBytes, 0, $lengthBytes.Length)
+  } finally {
+    $stream.Dispose()
+    Remove-Item -LiteralPath $baseExe -Force -ErrorAction SilentlyContinue
+  }
+  if (-not (Test-Path -LiteralPath $Destination)) {
+    throw "Failed to create Windows installer: $Destination"
+  }
+}
+
 $repoRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot '..')).Path
 $projectsRoot = Split-Path -Parent $repoRoot
 if (-not $HelperSourceRoot) {
@@ -114,12 +167,16 @@ if (-not $ExtensionSourceRoot) {
 if (-not $LauncherSourcePath) {
   $LauncherSourcePath = Join-Path $repoRoot 'local-agent-launcher\AidpLocalHelperLauncher.cs'
 }
+if (-not $InstallerSourcePath) {
+  $InstallerSourcePath = Join-Path $repoRoot 'local-agent-launcher\AidpLocalHelperSetup.cs'
+}
 if (-not $OutputRoot) {
   $OutputRoot = Join-Path $repoRoot 'data\local-agent\releases\packages'
 }
 
 $helperRoot = (Resolve-Path -LiteralPath $HelperSourceRoot).Path
 $launcherSource = (Resolve-Path -LiteralPath $LauncherSourcePath).Path
+$installerSource = (Resolve-Path -LiteralPath $InstallerSourcePath).Path
 $extensionRoot = (Resolve-Path -LiteralPath $ExtensionSourceRoot).Path
 if (-not (Test-Path -LiteralPath $OutputRoot)) {
   New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
@@ -294,6 +351,14 @@ if (Test-Path -LiteralPath $InstallRoot) {
 
 ## 安装
 
+推荐直接运行套件根目录的安装包：
+
+```powershell
+.\AIDP-Local-Helper-Setup-$Version.exe
+```
+
+也可以使用脚本安装：
+
 ```powershell
 pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
 ```
@@ -310,6 +375,7 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
 "@
   Write-Utf8File -Path (Join-Path $installRoot 'README.md') -Content ($installReadme.TrimStart() + "`n")
 
+  $installerExeName = "AIDP-Local-Helper-Setup-$Version.exe"
   $manifest = [ordered]@{
     suite_version = $Version
     generated_at = (Get-Date).ToUniversalTime().ToString('o')
@@ -319,6 +385,15 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
       tray = $true
       single_instance = $true
       autostart_entry = 'AIDP 本机助手.cmd'
+    }
+    windows_installer = [ordered]@{
+      version = $Version
+      path = $installerExeName
+      embedded_suite = $true
+      supports_uninstall = $true
+      creates_desktop_shortcut = $true
+      creates_start_menu_shortcut = $true
+      supports_autostart = $true
     }
     local_agent = [ordered]@{
       version = $Version
@@ -336,6 +411,13 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
   }
   Write-Utf8File -Path (Join-Path $stagingRoot 'manifest.json') -Content (($manifest | ConvertTo-Json -Depth 20) + "`n")
 
+  $payloadSuitePath = Join-Path $tempRoot "aidp-local-suite-$Version-payload.zip"
+  New-ZipFromDirectory -SourceDirectory $stagingRoot -DestinationZip $payloadSuitePath
+
+  $installerPath = Join-Path $outputRootResolved $installerExeName
+  Build-WindowsInstaller -Source $installerSource -Destination $installerPath -PayloadZip $payloadSuitePath
+  Copy-RequiredFile -Source $installerPath -Destination (Join-Path $stagingRoot $installerExeName)
+
   $suitePath = Join-Path $outputRootResolved "aidp-local-suite-$Version.zip"
   New-ZipFromDirectory -SourceDirectory $stagingRoot -DestinationZip $suitePath
 
@@ -349,6 +431,7 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
     ok = $true
     version = $Version
     suite = $suitePath
+    installer = $installerPath
     local_agent = $agentPackagePath
     browser_extension = $extensionPackagePath
   } | ConvertTo-Json -Depth 20

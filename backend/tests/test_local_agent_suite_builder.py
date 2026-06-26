@@ -50,11 +50,15 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
 
         assert result.returncode == 0, result.stderr + result.stdout
         suite = output_root / "aidp-local-suite-0.9.1.zip"
+        installer = output_root / "AIDP-Local-Helper-Setup-0.9.1.exe"
         assert suite.is_file()
+        assert installer.is_file()
+        assert installer.read_bytes().startswith(b"MZ")
         with zipfile.ZipFile(suite) as archive:
             names = set(archive.namelist())
             assert "manifest.json" in names
             assert "AIDP 本机助手.exe" in names
+            assert "AIDP-Local-Helper-Setup-0.9.1.exe" in names
             assert "local-agent/host-launcher.ps1" in names
             assert "local-agent/start-local-agent.ps1" in names
             assert "local-agent/apply-update.ps1" in names
@@ -75,6 +79,11 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
     assert manifest["windows_launcher"]["path"] == "AIDP 本机助手.exe"
     assert manifest["windows_launcher"]["tray"] is True
     assert manifest["windows_launcher"]["single_instance"] is True
+    assert manifest["windows_installer"]["path"] == "AIDP-Local-Helper-Setup-0.9.1.exe"
+    assert manifest["windows_installer"]["embedded_suite"] is True
+    assert manifest["windows_installer"]["supports_uninstall"] is True
+    assert manifest["windows_installer"]["creates_desktop_shortcut"] is True
+    assert manifest["windows_installer"]["creates_start_menu_shortcut"] is True
     assert manifest["browser_extension"]["path"] == "browser-extension/aidp-score-helper-0.9.1.zip"
     assert manifest["install"]["entry"] == "install/install.ps1"
     assert "AIDP 本机助手.exe" in install_script
@@ -124,6 +133,32 @@ def test_windows_launcher_source_exposes_p0_tray_behaviour() -> None:
         "--exit",
         "Win32_Process",
         "KillLauncherProcessesInAppRoot",
+        "正在恢复本机助手",
         "netstat",
+    ]:
+        assert token in text
+
+
+def test_windows_setup_source_exposes_p1_installer_behaviour() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = repo_root / "local-agent-launcher" / "AidpLocalHelperSetup.cs"
+
+    text = source.read_text(encoding="utf-8")
+
+    for token in [
+        "AIDP 本机助手安装向导",
+        "--uninstall",
+        "ExtractEmbeddedPayloadZip",
+        "CreateShortcut",
+        "DesktopDirectory",
+        "Programs",
+        "CurrentVersion\\Uninstall",
+        "DisplayName",
+        "UninstallString",
+        "AIDP 本机助手卸载.exe",
+        "ScheduleSelfCleanup",
+        "是否保留本机配置",
+        "AIDP 本机助手.cmd",
+        "LaunchAfterInstall",
     ]:
         assert token in text

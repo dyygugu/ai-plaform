@@ -12,6 +12,7 @@ router = APIRouter(prefix="/local-agent", tags=["local-agent"])
 
 LOCAL_AGENT_VERSION = "0.9.1"
 DEFAULT_SUITE_NAME = f"aidp-local-suite-{LOCAL_AGENT_VERSION}.zip"
+DEFAULT_INSTALLER_NAME = f"AIDP-Local-Helper-Setup-{LOCAL_AGENT_VERSION}.exe"
 DEFAULT_AGENT_NAME = "aidp-local-helper.zip"
 DEFAULT_EXTENSION_NAME = f"aidp-score-helper-{LOCAL_AGENT_VERSION}.zip"
 
@@ -28,6 +29,10 @@ def _latest_matching_file(pattern: str, fallback_name: str) -> Path:
 
 def _latest_suite_file() -> Path:
     return _latest_matching_file("aidp-local-suite-*.zip", DEFAULT_SUITE_NAME)
+
+
+def _latest_installer_file() -> Path:
+    return _latest_matching_file("AIDP-Local-Helper-Setup-*.exe", DEFAULT_INSTALLER_NAME)
 
 
 def _latest_extension_file() -> Path:
@@ -56,6 +61,15 @@ def _release_version_from_extension(path: Path) -> str:
     return LOCAL_AGENT_VERSION
 
 
+def _release_version_from_installer(path: Path) -> str:
+    prefix = "AIDP-Local-Helper-Setup-"
+    suffix = ".exe"
+    name = path.name
+    if name.startswith(prefix) and name.endswith(suffix):
+        return name[len(prefix) : -len(suffix)]
+    return LOCAL_AGENT_VERSION
+
+
 def _file_sha256(path: Path) -> str:
     if not path.is_file():
         return ""
@@ -70,7 +84,7 @@ def _file_size(path: Path) -> int:
     return path.stat().st_size if path.is_file() else 0
 
 
-def _download_file(path: Path) -> FileResponse:
+def _download_file(path: Path, media_type: str = "application/zip") -> FileResponse:
     root = _release_root().resolve()
     resolved = path.resolve()
     if root != resolved and root not in resolved.parents:
@@ -80,12 +94,13 @@ def _download_file(path: Path) -> FileResponse:
             status_code=404,
             detail={"code": "LOCAL_AGENT_PACKAGE_NOT_FOUND", "message": f"本机助手发布包尚未生成：{path.name}。"},
         )
-    return FileResponse(path=resolved, media_type="application/zip", filename=resolved.name)
+    return FileResponse(path=resolved, media_type=media_type, filename=resolved.name)
 
 
 @router.get("/releases/latest", response_model=LocalAgentReleaseRead)
 def read_local_agent_latest_release() -> LocalAgentReleaseRead:
     suite = _latest_suite_file()
+    installer = _latest_installer_file()
     agent = _latest_agent_file()
     extension = _latest_extension_file()
     suite_version = _release_version_from_suite(suite)
@@ -113,6 +128,12 @@ def read_local_agent_latest_release() -> LocalAgentReleaseRead:
             sha256=_file_sha256(suite),
             size_bytes=_file_size(suite),
         ),
+        windows_installer=LocalAgentComponentReleaseRead(
+            version=_release_version_from_installer(installer),
+            download_url="/api/v1/local-agent/releases/latest/download-installer",
+            sha256=_file_sha256(installer),
+            size_bytes=_file_size(installer),
+        ),
         browser_extension=LocalAgentComponentReleaseRead(
             version=_release_version_from_extension(extension),
             download_url="/api/v1/local-agent/releases/latest/download-extension",
@@ -127,6 +148,11 @@ def read_local_agent_latest_release() -> LocalAgentReleaseRead:
 @router.get("/releases/latest/download-suite")
 def download_local_agent_suite() -> FileResponse:
     return _download_file(_latest_suite_file())
+
+
+@router.get("/releases/latest/download-installer")
+def download_local_agent_installer() -> FileResponse:
+    return _download_file(_latest_installer_file(), media_type="application/vnd.microsoft.portable-executable")
 
 
 @router.get("/releases/latest/download-agent")
