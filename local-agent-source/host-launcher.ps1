@@ -996,7 +996,9 @@ function Get-AssistantConsoleHtml {
       const release = state.release || {};
       setCard(1, currentUrl() ? '连接正常' : '未配置', `当前平台：${currentUrl()}`, currentUrl() ? 'ok' : 'wait');
       const pluginVersion = plugin.extension_version || '';
-      setCard(2, pluginVersion ? (plugin.has_update ? '发现新版' : '已连接') : '未连接', pluginVersion ? `插件版本：${pluginVersion}` : '暂未检测到浏览器插件，请确认插件已安装并启用。', pluginVersion ? (plugin.has_update ? 'wait' : 'ok') : 'wait');
+      const bundledPluginVersion = plugin.bundled_version || '';
+      const autoLoad = Boolean(plugin.managed_browser_auto_load_supported);
+      setCard(2, pluginVersion ? (plugin.has_update ? '发现新版' : '已连接') : (autoLoad ? '托管浏览器自动加载' : '未连接'), pluginVersion ? `插件已连接，版本：${pluginVersion}` : (bundledPluginVersion ? `内置插件版本：${bundledPluginVersion}；平台打开的任务浏览器会自动加载。` : '暂未检测到浏览器插件，请确认插件已安装并启用。'), pluginVersion || autoLoad ? (plugin.has_update ? 'wait' : 'ok') : 'wait');
       setCard(3, runtime.status === 'running' ? '已开启' : '未开启', runtime.status === 'running' ? '当前运行：空闲' : '执行能力尚未开启。', runtime.status === 'running' ? 'ok' : 'wait');
       const pending = Number(queue.pending_count || 0);
       const failed = Number(queue.failed_cache_count || 0);
@@ -1152,12 +1154,16 @@ function Get-AssistantConsoleHtml {
     async function loadPluginStatus() {
       state.plugin = await api('/api/assistant/plugin-status');
       const plugin = state.plugin.plugin_status || {};
+      const connectedVersion = plugin.extension_version || '';
+      const bundledVersion = plugin.bundled_version || '';
+      const autoLoad = Boolean(plugin.managed_browser_auto_load_supported);
       document.getElementById('pluginInfo').innerHTML = `
-        <p>插件状态：${statusPill(plugin.extension_version ? (plugin.has_update ? '发现新版' : '已连接') : '未连接', plugin.extension_version ? (plugin.has_update ? 'wait' : 'ok') : 'wait')}</p>
-        <p>当前版本：${escapeText(plugin.extension_version || '暂未检测到')}</p>
+        <p>插件状态：${statusPill(connectedVersion ? (plugin.has_update ? '发现新版' : '已连接') : (autoLoad ? '托管任务浏览器会自动加载' : '未连接'), connectedVersion || autoLoad ? (plugin.has_update ? 'wait' : 'ok') : 'wait')}</p>
+        <p>已连接版本：${escapeText(connectedVersion || '暂未检测到普通浏览器插件连接')}</p>
+        <p>内置版本：${escapeText(bundledVersion || '暂未读取到安装包内置版本')}</p>
         <p>最新版本：${escapeText(plugin.latest_version || '暂未获取')}</p>
         <p>最后连接时间：${escapeText(plugin.reported_at || '暂无记录')}</p>
-        <div class="hint">${plugin.extension_version ? '插件连接正常。' : '暂未检测到浏览器插件。请确认插件已安装，并且浏览器正在运行。'}</div>
+        <div class="hint">${connectedVersion ? '普通浏览器插件连接正常。' : (autoLoad ? '本机助手启动的托管 Edge 任务浏览器会自动加载内置插件；普通浏览器如果需要使用，请在扩展管理页手动加载。' : '暂未检测到浏览器插件。请确认插件已安装，并且浏览器正在运行。')}</div>
       `;
       refreshCardsFromState();
     }
@@ -1199,9 +1205,10 @@ function Get-AssistantConsoleHtml {
         <p>本机助手当前版本：${escapeText(release.local_agent?.current_version || '未知')}</p>
         <p>本机助手最新版本：${escapeText(release.local_agent?.latest_version || '暂未获取')}</p>
         <p>浏览器插件当前版本：${escapeText(release.browser_extension?.current_version || '暂未检测到')}</p>
+        <p>浏览器插件内置版本：${escapeText(release.browser_extension?.bundled_version || '暂未读取到')}</p>
         <p>浏览器插件最新版本：${escapeText(release.browser_extension?.latest_version || '暂未获取')}</p>
         <p>更新状态：${statusPill(updateText(release.update_status), release.update_status === ['pending','idle'].join('_') ? 'wait' : 'ok')}</p>
-        <div class="hint">${release.update_status === ['pending','idle'].join('_') ? '已发现新版，但当前正在执行任务。系统会等空闲后再更新，不会打断当前任务。' : '浏览器插件需要手动更新。请打开插件更新包目录，并按安装说明操作。'}</div>
+        <div class="hint">${release.update_status === ['pending','idle'].join('_') ? '已发现新版，但当前正在执行任务。系统会等空闲后再更新，不会打断当前任务。' : '本机助手托管任务浏览器会自动加载内置插件；普通浏览器需要手动更新。'}</div>
       `;
       refreshCardsFromState();
     }
@@ -1893,18 +1900,70 @@ function Open-AssistantFolder {
   }
 }
 
+function Get-InstallRoot {
+  Split-Path -Parent $PSScriptRoot
+}
+
+function Get-BundledBrowserExtensionInfo {
+  $extensionDirectory = Join-Path (Get-InstallRoot) 'browser-extension\aidp-score-helper'
+  $manifestPath = Join-Path $extensionDirectory 'manifest.json'
+  $version = ''
+  if (Test-Path -LiteralPath $manifestPath) {
+    try {
+      $manifest = Read-JsonFile $manifestPath
+      $version = [string](Get-MapValue $manifest 'version')
+    } catch {
+      $version = ''
+    }
+  }
+  [ordered]@{
+    ok = [bool]((Test-Path -LiteralPath $manifestPath) -and $version)
+    bundled_version = $version
+    extension_directory = $extensionDirectory
+    manifest_path = $manifestPath
+    managed_browser_auto_load_supported = [bool](Test-Path -LiteralPath $manifestPath)
+  }
+}
+
+function Get-ManagedBrowserExtensionArguments {
+  $info = Get-BundledBrowserExtensionInfo
+  if (-not [bool](Get-MapValue $info 'managed_browser_auto_load_supported')) { return @() }
+  $extensionDirectory = [string](Get-MapValue $info 'extension_directory')
+  if (-not $extensionDirectory) { return @() }
+  @("--load-extension=$extensionDirectory")
+}
+
 function Get-StoredPluginStatus {
   $path = Get-PluginStatusPath
-  $stored = Read-JsonFile $path
-  if ($stored) { return ConvertTo-PlainHashtable $stored }
-  [ordered]@{
+  $bundled = Get-BundledBrowserExtensionInfo
+  $defaults = [ordered]@{
     extension_version = ''
     reported_at = ''
-    latest_version = ''
+    latest_version = [string](Get-MapValue $bundled 'bundled_version')
+    bundled_version = [string](Get-MapValue $bundled 'bundled_version')
+    bundled_path = [string](Get-MapValue $bundled 'extension_directory')
+    managed_browser_auto_load_supported = [bool](Get-MapValue $bundled 'managed_browser_auto_load_supported')
     has_update = $false
     downloaded = $false
     update_message = ''
   }
+  $stored = Read-JsonFile $path
+  if ($stored) {
+    $status = ConvertTo-PlainHashtable $stored
+    foreach ($key in $defaults.Keys) {
+      if (-not $status.ContainsKey($key) -or $null -eq $status[$key]) {
+        $status[$key] = $defaults[$key]
+      }
+    }
+    if (-not [string](Get-MapValue $status 'latest_version')) {
+      $status['latest_version'] = [string](Get-MapValue $bundled 'bundled_version')
+    }
+    $status['bundled_version'] = [string](Get-MapValue $bundled 'bundled_version')
+    $status['bundled_path'] = [string](Get-MapValue $bundled 'extension_directory')
+    $status['managed_browser_auto_load_supported'] = [bool](Get-MapValue $bundled 'managed_browser_auto_load_supported')
+    return $status
+  }
+  $defaults
 }
 
 function Set-PluginVersion {
@@ -1947,18 +2006,38 @@ function Save-ReleaseDownload {
   }
 }
 
+function Add-AssistantReleaseStatusDefaults {
+  param($Status)
+  $statusMap = ConvertTo-PlainHashtable $Status
+  $pluginStatus = Get-StoredPluginStatus
+  $connectedExtensionVersion = [string](Get-MapValue $pluginStatus 'extension_version')
+  $bundledExtensionVersion = [string](Get-MapValue $pluginStatus 'bundled_version')
+  $currentExtensionVersion = if ($connectedExtensionVersion) { $connectedExtensionVersion } else { $bundledExtensionVersion }
+  $latestExtensionVersion = [string](Get-MapValue $pluginStatus 'latest_version')
+  if (-not $latestExtensionVersion) { $latestExtensionVersion = $bundledExtensionVersion }
+  $browserExtension = Get-MapValue $statusMap 'browser_extension'
+  if (-not $browserExtension) { $browserExtension = [ordered]@{} } else { $browserExtension = ConvertTo-PlainHashtable $browserExtension }
+  if (-not [string](Get-MapValue $browserExtension 'current_version')) { $browserExtension['current_version'] = $currentExtensionVersion }
+  if (-not [string](Get-MapValue $browserExtension 'connected_version')) { $browserExtension['connected_version'] = $connectedExtensionVersion }
+  if (-not [string](Get-MapValue $browserExtension 'bundled_version')) { $browserExtension['bundled_version'] = $bundledExtensionVersion }
+  if (-not [string](Get-MapValue $browserExtension 'latest_version')) { $browserExtension['latest_version'] = $latestExtensionVersion }
+  if (-not $browserExtension.ContainsKey('managed_browser_auto_load_supported')) { $browserExtension['managed_browser_auto_load_supported'] = [bool](Get-MapValue $pluginStatus 'managed_browser_auto_load_supported') }
+  $statusMap['browser_extension'] = $browserExtension
+  $statusMap
+}
+
 function Get-AssistantReleaseStatus {
   $stored = Read-JsonFile (Get-ReleaseStatusPath)
-  if ($stored) { return ConvertTo-PlainHashtable $stored }
+  if ($stored) { return Add-AssistantReleaseStatusDefaults -Status $stored }
   $pluginStatus = Get-StoredPluginStatus
-  [ordered]@{
+  Add-AssistantReleaseStatusDefaults -Status ([ordered]@{
     ok = $true
     local_agent = [ordered]@{ current_version = $script:HelperVersion; latest_version = $script:HelperVersion; has_update = $false; downloaded = $false }
-    browser_extension = [ordered]@{ current_version = [string](Get-MapValue $pluginStatus 'extension_version'); latest_version = [string](Get-MapValue $pluginStatus 'extension_version'); has_update = $false; downloaded = $false }
+    browser_extension = [ordered]@{ current_version = [string](Get-MapValue $pluginStatus 'extension_version'); bundled_version = [string](Get-MapValue $pluginStatus 'bundled_version'); latest_version = [string](Get-MapValue $pluginStatus 'latest_version'); has_update = $false; downloaded = $false; managed_browser_auto_load_supported = [bool](Get-MapValue $pluginStatus 'managed_browser_auto_load_supported') }
     update_status = 'idle'
     idle = Test-AssistantIdle
     downloads = Get-AssistantDownloads
-  }
+  })
 }
 
 function Check-AssistantUpdates {
@@ -1971,6 +2050,8 @@ function Check-AssistantUpdates {
   if (-not $latestAgentVersion) { $latestAgentVersion = [string](Get-MapValue $manifest 'suite_version') }
   if (-not $latestExtensionVersion) { $latestExtensionVersion = [string](Get-MapValue $manifest 'suite_version') }
   $currentExtensionVersion = [string](Get-MapValue $pluginStatus 'extension_version')
+  $bundledExtensionVersion = [string](Get-MapValue $pluginStatus 'bundled_version')
+  if (-not $currentExtensionVersion) { $currentExtensionVersion = $bundledExtensionVersion }
   $agentHasUpdate = $latestAgentVersion -and $latestAgentVersion -ne $script:HelperVersion
   $extensionHasUpdate = $latestExtensionVersion -and $currentExtensionVersion -and $latestExtensionVersion -ne $currentExtensionVersion
   $agentDownload = if ($agentHasUpdate) { Save-ReleaseDownload -ReleasePart $localAgent } else { [ordered]@{ downloaded = $false; path = ''; error = '' } }
@@ -1988,11 +2069,14 @@ function Check-AssistantUpdates {
     }
     browser_extension = [ordered]@{
       current_version = $currentExtensionVersion
+      connected_version = [string](Get-MapValue $pluginStatus 'extension_version')
+      bundled_version = $bundledExtensionVersion
       latest_version = $latestExtensionVersion
       has_update = [bool]$extensionHasUpdate
       downloaded = [bool](Get-MapValue $extensionDownload 'downloaded')
       download_path = [string](Get-MapValue $extensionDownload 'path')
       download_error = [string](Get-MapValue $extensionDownload 'error')
+      managed_browser_auto_load_supported = [bool](Get-MapValue $pluginStatus 'managed_browser_auto_load_supported')
     }
     update_status = 'idle'
     idle = Test-AssistantIdle
@@ -2581,7 +2665,9 @@ function Open-AidpWithInjectedCookie {
     $cdpPort = Get-FreeCdpPort
     $edge = Get-EdgePath
     $bootstrapUrl = 'about:blank'
-    $arguments = @("--remote-debugging-port=$cdpPort", "--user-data-dir=$profilePath", '--no-first-run', '--no-default-browser-check', $bootstrapUrl)
+    $arguments = @("--remote-debugging-port=$cdpPort", "--user-data-dir=$profilePath")
+    $arguments += Get-ManagedBrowserExtensionArguments
+    $arguments += @('--no-first-run', '--no-default-browser-check', $bootstrapUrl)
     Start-Process -FilePath $edge -ArgumentList $arguments | Out-Null
   }
   $script:InjectedProfilePorts[([System.IO.Path]::GetFullPath($profilePath)).TrimEnd('\').ToLowerInvariant()] = $cdpPort
@@ -2603,7 +2689,8 @@ function Open-AidpWithInjectedCookie {
   } finally {
     $socket.Dispose()
   }
-  [ordered]@{ ok = $true; userId = [string]$session.userId; target = [string]$session.target; targetUrl = [string]$session.targetUrl; cdpPort = $cdpPort; profilePath = $profilePath; injectedCookieCount = @($cookies).Count; reused = $reused }
+  $extensionInfo = Get-BundledBrowserExtensionInfo
+  [ordered]@{ ok = $true; userId = [string]$session.userId; target = [string]$session.target; targetUrl = [string]$session.targetUrl; cdpPort = $cdpPort; profilePath = $profilePath; injectedCookieCount = @($cookies).Count; reused = $reused; extensionAutoLoadSupported = [bool](Get-MapValue $extensionInfo 'managed_browser_auto_load_supported'); extensionDirectory = [string](Get-MapValue $extensionInfo 'extension_directory') }
 }
 
 function Get-RequestListValue {
@@ -3091,13 +3178,17 @@ function Start-AidpProfile {
   $url = 'https://aidp.juejin.cn/operation/task-v2?page=1'
   $arguments = @(
     "--remote-debugging-port=$CdpPort",
-    "--user-data-dir=$profilePath",
+    "--user-data-dir=$profilePath"
+  )
+  $arguments += Get-ManagedBrowserExtensionArguments
+  $arguments += @(
     '--no-first-run',
     '--no-default-browser-check',
     $url
   )
   Start-Process -FilePath $edge -ArgumentList $arguments | Out-Null
-  [ordered]@{ ok = $true; userId = $safeUserId; cdpPort = $CdpPort; profilePath = $profilePath; url = $url }
+  $extensionInfo = Get-BundledBrowserExtensionInfo
+  [ordered]@{ ok = $true; userId = $safeUserId; cdpPort = $CdpPort; profilePath = $profilePath; url = $url; extensionAutoLoadSupported = [bool](Get-MapValue $extensionInfo 'managed_browser_auto_load_supported'); extensionDirectory = [string](Get-MapValue $extensionInfo 'extension_directory') }
 }
 
 $prefix = "http://${HostName}:${Port}/"

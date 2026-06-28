@@ -60,6 +60,32 @@ function New-ZipFromDirectory {
   }
 }
 
+function Copy-DirectoryContents {
+  param([string]$SourceDirectory, [string]$DestinationDirectory)
+  if (-not (Test-Path -LiteralPath $SourceDirectory)) {
+    throw "Source directory not found: $SourceDirectory"
+  }
+  if (Test-Path -LiteralPath $DestinationDirectory) {
+    Remove-Item -LiteralPath $DestinationDirectory -Recurse -Force
+  }
+  New-Item -ItemType Directory -Force -Path $DestinationDirectory | Out-Null
+  foreach ($item in Get-ChildItem -LiteralPath $SourceDirectory -Force) {
+    Copy-Item -LiteralPath $item.FullName -Destination $DestinationDirectory -Recurse -Force
+  }
+}
+
+function Set-ExtensionManifestVersion {
+  param([string]$ExtensionDirectory, [string]$Version)
+  $manifestPath = Join-Path $ExtensionDirectory 'manifest.json'
+  if (-not (Test-Path -LiteralPath $manifestPath)) {
+    throw "Browser extension manifest not found: $manifestPath"
+  }
+  $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+  $manifest.version = $Version
+  Write-Utf8File -Path $manifestPath -Content (($manifest | ConvertTo-Json -Depth 50) + "`n")
+  $Version
+}
+
 function Get-CSharpCompilerPath {
   $candidates = @(
     (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
@@ -415,13 +441,18 @@ Expand-Archive -LiteralPath $UpdateZip -DestinationPath $extractRoot -Force
 '@
   Write-Utf8File -Path (Join-Path $localAgentRoot 'apply-update.ps1') -Content ($applyUpdateScript.TrimStart() + "`n")
 
-  $extensionZip = Join-Path $extensionStageRoot "aidp-score-helper-$Version.zip"
-  New-ZipFromDirectory -SourceDirectory $extensionRoot -DestinationZip $extensionZip
-  $extensionReadme = Join-Path $extensionRoot 'README.md'
+  $preparedExtensionRoot = Join-Path $tempRoot 'prepared-browser-extension\aidp-score-helper'
+  Copy-DirectoryContents -SourceDirectory $extensionRoot -DestinationDirectory $preparedExtensionRoot
+  $extensionVersion = Set-ExtensionManifestVersion -ExtensionDirectory $preparedExtensionRoot -Version $Version
+  $extensionUnpackedRoot = Join-Path $extensionStageRoot 'aidp-score-helper'
+  Copy-DirectoryContents -SourceDirectory $preparedExtensionRoot -DestinationDirectory $extensionUnpackedRoot
+  $extensionZip = Join-Path $extensionStageRoot "aidp-score-helper-$extensionVersion.zip"
+  New-ZipFromDirectory -SourceDirectory $preparedExtensionRoot -DestinationZip $extensionZip
+  $extensionReadme = Join-Path $preparedExtensionRoot 'README.md'
   if (Test-Path -LiteralPath $extensionReadme) {
     Copy-RequiredFile -Source $extensionReadme -Destination (Join-Path $extensionStageRoot 'README.md')
   } else {
-    Write-Utf8File -Path (Join-Path $extensionStageRoot 'README.md') -Content "# AIDP Browser Extension`n`n在浏览器扩展管理页手动加载或更新插件包。`n"
+    Write-Utf8File -Path (Join-Path $extensionStageRoot 'README.md') -Content "# AIDP Browser Extension`n`n本机助手启动的托管 Edge 任务浏览器会自动加载 browser-extension/aidp-score-helper。普通浏览器请在扩展管理页手动加载或更新插件包。`n"
   }
 
   $installScript = @'
@@ -447,7 +478,7 @@ Copy-Item -LiteralPath (Join-Path $sourceExtension '*') -Destination $extensionT
   ok = $true
   install_root = $InstallRoot
   start_command = "`"$InstallRoot\AIDP 本机助手.exe`""
-  message = '本机助手已安装；插件包已复制到 browser-extension 目录，请按 README 手动更新浏览器插件。'
+  message = '本机助手已安装；插件包已复制到 browser-extension 目录。本机助手启动的托管任务浏览器会自动加载插件，普通浏览器请按 README 手动更新。'
 } | ConvertTo-Json -Depth 10
 '@
   Write-Utf8File -Path (Join-Path $installRoot 'install.ps1') -Content ($installScript.TrimStart() + "`n")
@@ -494,7 +525,7 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
 
 ## 插件
 
-浏览器插件包位于安装目录的 `browser-extension` 子目录。P0 不静默替换插件，请在浏览器扩展页手动更新。
+浏览器插件包位于安装目录的 `browser-extension` 子目录。本机助手启动的托管 Edge 任务浏览器会自动加载插件；普通浏览器出于 Chrome/Edge 安全策略限制，不做静默安装，请在扩展管理页手动加载或更新。
 "@
   Write-Utf8File -Path (Join-Path $installRoot 'README.md') -Content ($installReadme.TrimStart() + "`n")
 
@@ -535,8 +566,10 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
       entry = 'local-agent/host-launcher.ps1'
     }
     browser_extension = [ordered]@{
-      version = $Version
-      path = "browser-extension/aidp-score-helper-$Version.zip"
+      version = $extensionVersion
+      path = "browser-extension/aidp-score-helper-$extensionVersion.zip"
+      unpacked_path = 'browser-extension/aidp-score-helper/'
+      managed_browser_auto_load = $true
     }
     install = [ordered]@{
       entry = 'install/install.ps1'
@@ -562,7 +595,7 @@ pwsh.exe -ExecutionPolicy Bypass -File .\install.ps1
   $agentPackagePath = Join-Path $outputRootResolved 'aidp-local-helper.zip'
   New-ZipFromDirectory -SourceDirectory $localAgentRoot -DestinationZip $agentPackagePath
 
-  $extensionPackagePath = Join-Path $outputRootResolved "aidp-score-helper-$Version.zip"
+  $extensionPackagePath = Join-Path $outputRootResolved "aidp-score-helper-$extensionVersion.zip"
   Copy-Item -LiteralPath $extensionZip -Destination $extensionPackagePath -Force
 
   [ordered]@{

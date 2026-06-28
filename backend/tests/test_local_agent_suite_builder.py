@@ -1,4 +1,5 @@
 import json
+import io
 import subprocess
 import tempfile
 import zipfile
@@ -69,6 +70,9 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
             assert "local-agent/config/default-config.json" in names
             assert "local-agent/README.md" in names
             assert "browser-extension/aidp-score-helper-0.9.1.zip" in names
+            assert "browser-extension/aidp-score-helper/manifest.json" in names
+            assert "browser-extension/aidp-score-helper/background.js" in names
+            assert "browser-extension/aidp-score-helper/content.js" in names
             assert "browser-extension/README.md" in names
             assert "install/install.ps1" in names
             assert "install/uninstall.ps1" in names
@@ -77,6 +81,12 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
             default_config = json.loads(archive.read("local-agent/config/default-config.json").decode("utf-8"))
             install_script = archive.read("install/install.ps1").decode("utf-8")
+            bundled_extension_manifest = json.loads(
+                archive.read("browser-extension/aidp-score-helper/manifest.json").decode("utf-8")
+            )
+            with archive.open("browser-extension/aidp-score-helper-0.9.1.zip") as extension_zip_file:
+                with zipfile.ZipFile(io.BytesIO(extension_zip_file.read())) as extension_archive:
+                    zipped_extension_manifest = json.loads(extension_archive.read("manifest.json").decode("utf-8"))
 
         install_result = subprocess.run(
             [
@@ -101,6 +111,7 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
             assert (install_root / "manifest.json").is_file()
             assert (install_root / "AIDP 本机助手.exe").is_file()
             assert (install_root / "local-agent" / "host-launcher.ps1").is_file()
+            assert (install_root / "browser-extension" / "aidp-score-helper" / "manifest.json").is_file()
         finally:
             subprocess.run(
                 [
@@ -132,7 +143,12 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
     assert manifest["windows_installer"]["supports_uninstall"] is True
     assert manifest["windows_installer"]["creates_desktop_shortcut"] is True
     assert manifest["windows_installer"]["creates_start_menu_shortcut"] is True
+    assert manifest["browser_extension"]["version"] == "0.9.1"
     assert manifest["browser_extension"]["path"] == "browser-extension/aidp-score-helper-0.9.1.zip"
+    assert manifest["browser_extension"]["unpacked_path"] == "browser-extension/aidp-score-helper/"
+    assert manifest["browser_extension"]["managed_browser_auto_load"] is True
+    assert bundled_extension_manifest["version"] == "0.9.1"
+    assert zipped_extension_manifest["version"] == "0.9.1"
     assert manifest["code_signing"]["mode"] == "self_signed_internal"
     assert manifest["code_signing"]["certificate_path"] == "code-signing/AIDP-Local-Helper-CodeSigning.cer"
     assert manifest["code_signing"]["thumbprint"]
@@ -186,6 +202,23 @@ def test_windows_launcher_source_exposes_p0_tray_behaviour() -> None:
         "KillLauncherProcessesInAppRoot",
         "正在恢复本机助手",
         "netstat",
+    ]:
+        assert token in text
+
+
+def test_host_launcher_auto_loads_bundled_extension_for_managed_browsers() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = repo_root / "local-agent-source" / "host-launcher.ps1"
+
+    text = source.read_text(encoding="utf-8")
+
+    for token in [
+        "Get-BundledBrowserExtensionInfo",
+        "Get-ManagedBrowserExtensionArguments",
+        "--load-extension=",
+        "managed_browser_auto_load_supported",
+        "bundled_version",
+        "aidp-score-helper",
     ]:
         assert token in text
 
