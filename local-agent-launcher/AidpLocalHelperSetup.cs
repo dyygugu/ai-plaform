@@ -601,16 +601,12 @@ namespace Aidp.LocalHelperSetup
             byte[] all = File.ReadAllBytes(setupExePath);
             if (all.Length < Marker.Length + 8) throw new InvalidOperationException("安装器不包含内置套件。");
 
-            long lengthOffset = all.Length - 8;
+            long markerOffset = FindPayloadMarkerOffset(all);
+            if (markerOffset < 0) throw new InvalidOperationException("安装器内置套件标记无效。");
+
+            long lengthOffset = markerOffset + Marker.Length;
             long payloadLength = BitConverter.ToInt64(all, (int)lengthOffset);
-            long markerOffset = lengthOffset - Marker.Length;
-            if (markerOffset < 0 || payloadLength <= 0) throw new InvalidOperationException("内置套件长度无效。");
-
-            for (int i = 0; i < Marker.Length; i++)
-            {
-                if (all[markerOffset + i] != Marker[i]) throw new InvalidOperationException("安装器内置套件标记无效。");
-            }
-
+            if (payloadLength <= 0) throw new InvalidOperationException("内置套件长度无效。");
             long payloadOffset = markerOffset - payloadLength;
             if (payloadOffset < 0) throw new InvalidOperationException("内置套件位置无效。");
 
@@ -618,6 +614,29 @@ namespace Aidp.LocalHelperSetup
             {
                 output.Write(all, (int)payloadOffset, (int)payloadLength);
             }
+        }
+
+        private static long FindPayloadMarkerOffset(byte[] all)
+        {
+            for (int markerOffset = all.Length - Marker.Length - 8; markerOffset >= 0; markerOffset--)
+            {
+                if (!MatchesMarker(all, markerOffset)) continue;
+
+                long lengthOffset = markerOffset + Marker.Length;
+                long payloadLength = BitConverter.ToInt64(all, (int)lengthOffset);
+                long payloadOffset = markerOffset - payloadLength;
+                if (payloadLength > 0 && payloadOffset >= 0) return markerOffset;
+            }
+            return -1;
+        }
+
+        private static bool MatchesMarker(byte[] all, int markerOffset)
+        {
+            for (int i = 0; i < Marker.Length; i++)
+            {
+                if (all[markerOffset + i] != Marker[i]) return false;
+            }
+            return true;
         }
     }
 }

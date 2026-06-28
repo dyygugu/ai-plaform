@@ -53,6 +53,7 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
         assert result.returncode == 0, (result.stderr or "") + (result.stdout or "")
         suite = output_root / "aidp-local-suite-0.9.1.zip"
         installer = output_root / "AIDP-Local-Helper-Setup-0.9.1.exe"
+        install_root = tmp_root / "installed"
         assert suite.is_file()
         assert installer.is_file()
         assert installer.read_bytes().startswith(b"MZ")
@@ -76,6 +77,48 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
             default_config = json.loads(archive.read("local-agent/config/default-config.json").decode("utf-8"))
             install_script = archive.read("install/install.ps1").decode("utf-8")
+
+        install_result = subprocess.run(
+            [
+                str(installer),
+                "--quiet",
+                "--install-root",
+                str(install_root),
+                "--no-desktop-shortcut",
+                "--no-start-menu-shortcut",
+                "--no-launch",
+            ],
+            cwd=repo_root,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            capture_output=True,
+            timeout=60,
+            check=False,
+        )
+        try:
+            assert install_result.returncode == 0, (install_result.stderr or "") + (install_result.stdout or "")
+            assert (install_root / "manifest.json").is_file()
+            assert (install_root / "AIDP 本机助手.exe").is_file()
+            assert (install_root / "local-agent" / "host-launcher.ps1").is_file()
+        finally:
+            subprocess.run(
+                [
+                    str(installer),
+                    "--uninstall",
+                    "--quiet",
+                    "--remove-config",
+                    "--install-root",
+                    str(install_root),
+                ],
+                cwd=repo_root,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                timeout=60,
+                check=False,
+            )
 
     assert manifest["suite_version"] == "0.9.1"
     assert manifest["local_agent"]["entry"] == "local-agent/host-launcher.ps1"
