@@ -6,6 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.settings import get_settings
+from app.models.account import AccountStatus, AidpAccount
 from app.models.task import RuntimeConfig, TaskCatalogEvent, TaskCatalogItem, TaskRuleConfig, TaskVisibility
 from app.schemas.task import TaskCatalogSeedRequest, TaskRuleConfigUpdateRequest
 from app.services.task_rules import (
@@ -86,14 +87,31 @@ def list_task_catalog(db: Session, source_account_user_id: Optional[str] = None)
     query = select(TaskCatalogItem)
     if source:
         query = query.where(TaskCatalogItem.source_account_user_id == source)
+    else:
+        active_sources, has_registered_sources = task_catalog_active_source_scope(db)
+        if has_registered_sources and not active_sources:
+            return []
+        if active_sources:
+            query = query.where(TaskCatalogItem.source_account_user_id.in_(active_sources))
     items = list(
         db.scalars(
             query.order_by(TaskCatalogItem.updated_at.desc())
         )
     )
+    items = [item for item in items if item.visibility != TaskVisibility.HIDDEN]
     items = _drop_masked_duplicates(items)
     items = sorted(items, key=lambda item: (_pending_sort_value(item.pending_raw), item.task_status_raw, item.updated_at), reverse=True)
     return items if source else _deduplicate_catalog_by_task_id(items)
+
+
+def task_catalog_active_source_scope(db: Session) -> tuple[set[str], bool]:
+    rows = list(db.execute(select(AidpAccount.user_id, AidpAccount.status)))
+    active_sources = {
+        str(user_id).strip()
+        for user_id, status in rows
+        if str(user_id or "").strip() and status != AccountStatus.DISABLED
+    }
+    return active_sources, bool(rows)
 
 
 def _deduplicate_catalog_by_task_id(items: list[TaskCatalogItem]) -> list[TaskCatalogItem]:

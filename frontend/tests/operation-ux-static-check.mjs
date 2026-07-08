@@ -295,6 +295,9 @@ assert.match(tasks, /operationProcessPlan[\s\S]*去 AI 标注能力工作台制�
 assert.doesNotMatch(tasks, /InputNumber[\s\S]*?addonAfter/, "任务操作台不能使用已废弃的 InputNumber addonAfter，避免生产控制台控制台告警");
 assert.match(tasks, /Descriptions\.Item label="录制能力" span=\{2\}/, "任务操作台录制能力描述项需要独占一行，避免 Descriptions span 告警");
 assert.doesNotMatch(tasks, /Form\.useForm|sourceForm|ruleForm/, "任务页首屏目录治理不应使用 rc-field-form，避免循环引用控制台告警");
+assert.doesNotMatch(tasks, /<Card title="目录治理"/, "任务页不能继续明面展示目录治理，目录来源和简称规则应进入系统设置或运维入口");
+assert.doesNotMatch(tasks, /保存来源账号/, "任务页不能继续承担来源账号配置保存");
+assert.doesNotMatch(tasks, /保存规则/, "任务页不能继续承担简称规则维护保存");
 assert.match(client, /\/task-auto-runs\/preflight/, "前端客户端需要调用通用自动做题启动前自检接口");
 assert.doesNotMatch(tasks, /startTaskAutoRun\(/, "旧任务页不能接入通用自动做题启动接口");
 assert.match(tasks, /startTaskAutoRunWorker/, "任务操作台需要能启动通用后台循环");

@@ -8,7 +8,6 @@ import {
   fetchTaskDetail,
   fetchTaskHttpQuestionContext,
   fetchTaskOperationProcessPlan,
-  fetchTaskRules,
   fetchProductionDashboard,
   openAccountTarget,
   fetchTaskAbilityDrafts,
@@ -38,8 +37,6 @@ import {
   stopAutoAnswerRun,
   stopTaskAutoRun,
   stopTaskAutoRunWorker,
-  updateTaskRules,
-  updateTaskSourceAccount,
   type TaskAutoRunAccountState,
   type TaskAutoRunAccountEvidence,
   type TaskAutoRunResponse,
@@ -81,7 +78,6 @@ import {
   type TaskCatalogDetailResponse,
   type TaskCatalogItem,
   type TaskCatalogResponse,
-  type TaskRuleConfigResponse,
   type TaskAbilityDraftItem,
   type Bon8ProductionRunResponse,
   type ProductionAccountCard,
@@ -360,7 +356,6 @@ export function TasksPage() {
   const [providerPrompt, setProviderPrompt] = useState("按返修评分规则输出结构化 JSON；重点复核最终截图、视频动效和前后场景一致性。");
   const [reviewNote, setReviewNote] = useState("人工确认分数、原因、一致性和废弃判断可作为草稿暂存起点。");
   const [reviewApproval, setReviewApproval] = useState<TaskDraftReviewApprovalResponse | null>(null);
-  const [rules, setRules] = useState<TaskRuleConfigResponse | null>(null);
   const [lastRefresh, setLastRefresh] = useState<ProductionAccountRefreshResponse | null>(null);
   const [showOnlyPendingTasks, setShowOnlyPendingTasks] = useState(true);
   const [loading, setLoading] = useState(false);
@@ -380,14 +375,10 @@ export function TasksPage() {
   const [autoRunPreflight, setAutoRunPreflight] = useState<TaskAutoRunPreflightResponse | null>(null);
   const [autoRunWorkerStatus, setAutoRunWorkerStatus] = useState<TaskAutoRunWorkerStatusResponse | null>(null);
   const [noSubmitResult, setNoSubmitResult] = useState<UnifiedNoSubmitResult | null>(null);
-  const [taskSourceAccountUserId, setTaskSourceAccountUserId] = useState("");
-  const [prefixRulesText, setPrefixRulesText] = useState("");
-  const [manualShortNamesText, setManualShortNamesText] = useState("{}");
 
   const loadCatalog = async () => {
     const response = await fetchTaskCatalog();
     setCatalog(response);
-    setTaskSourceAccountUserId(response.source_account_user_id);
   };
 
   const loadProductionDashboard = async () => {
@@ -403,16 +394,8 @@ export function TasksPage() {
     await Promise.all([loadCatalog(), loadProductionDashboard(), loadTaskAbilities()]);
   };
 
-  const loadRules = async () => {
-    const response = await fetchTaskRules();
-    setRules(response);
-    setPrefixRulesText(response.prefix_rules.join("\n"));
-    setManualShortNamesText(JSON.stringify(response.manual_short_names, null, 2));
-  };
-
   useEffect(() => {
     void loadTaskWorkbench();
-    void loadRules();
   }, []);
 
   const openDetail = async (record: TaskCatalogItem) => {
@@ -904,26 +887,6 @@ export function TasksPage() {
     } finally {
       setLoading(false);
     }
-  };
-
-  const handleSourceSubmit = async () => {
-    const result = await updateTaskSourceAccount(taskSourceAccountUserId);
-    message.success(result.message);
-    await loadCatalog();
-  };
-
-  const handleRuleSubmit = async () => {
-    let manualShortNames: Record<string, string> = {};
-    try {
-      manualShortNames = manualShortNamesText.trim() ? JSON.parse(manualShortNamesText) : {};
-    } catch {
-      message.error("单任务手动简称必须是 JSON 对象");
-      return;
-    }
-    const prefixRules = prefixRulesText.split("\n").map((item) => item.trim()).filter(Boolean);
-    const response = await updateTaskRules({ prefix_rules: prefixRules, manual_short_names: manualShortNames });
-    setRules(response);
-    message.success("简称规则已保存，刷新任务目录后生效");
   };
 
   const dedupedTasks = useMemo(() => dedupeTaskCatalogItems(catalog?.items ?? []), [catalog]);
@@ -1701,26 +1664,6 @@ export function TasksPage() {
 
       <Card title="真实任务目录明细" extra={<Space><Switch checked={showOnlyPendingTasks} onChange={setShowOnlyPendingTasks} /><Typography.Text>只看有待处理任务</Typography.Text></Space>}>
         <Table columns={columns} dataSource={visibleTasks} rowKey={(record) => `${record.source_account_user_id}-${record.task_id}-${record.id}`} loading={loading} pagination={{ pageSize: 8 }} />
-      </Card>
-
-      <Card title="目录治理">
-        <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-          <Space wrap align="center">
-            <Typography.Text>来源账号</Typography.Text>
-            <Input style={{ width: 260 }} value={taskSourceAccountUserId} onChange={(event) => setTaskSourceAccountUserId(event.target.value)} />
-            <Button onClick={() => void handleSourceSubmit()}>保存来源账号</Button>
-          </Space>
-          <Space direction="vertical" style={{ width: "100%" }}>
-            <Typography.Text>自动去除前缀（每行一个）</Typography.Text>
-            <Input.TextArea rows={3} placeholder="RFT人标_" value={prefixRulesText} onChange={(event) => setPrefixRulesText(event.target.value)} />
-            <Typography.Text>单任务手动简称 JSON（任务ID 到 简称）</Typography.Text>
-            <Input.TextArea rows={3} placeholder='{"7634***9806":"美观度"}' value={manualShortNamesText} onChange={(event) => setManualShortNamesText(event.target.value)} />
-            <Space>
-              <Button onClick={() => void handleRuleSubmit()}>保存规则</Button>
-              <Typography.Text type="secondary">当前前缀 {rules?.prefix_rules.length ?? 0} 条，手动简称 {Object.keys(rules?.manual_short_names ?? {}).length} 条</Typography.Text>
-            </Space>
-          </Space>
-        </Space>
       </Card>
 
       <Drawer title="任务操作台" width={560} open={drawerOpen} onClose={() => setDrawerOpen(false)}>

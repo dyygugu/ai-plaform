@@ -19,14 +19,27 @@ from app.schemas.account_coverage import (
 )
 from app.services.audit_service import write_audit
 from app.services.task_rules import utc_now
-from app.services.task_service import get_task_source_account_user_id
+from app.services.task_service import get_task_source_account_user_id, task_catalog_active_source_scope
 
 EXPECTED_ACCOUNT_COUNT = 7
 
 
 def build_account_coverage_summary(db: Session) -> AccountCoverageSummaryResponse:
-    accounts = list(db.scalars(select(AidpAccount).order_by(AidpAccount.is_task_source.desc(), AidpAccount.user_id.asc())))
-    tasks = list(db.scalars(select(TaskCatalogItem).order_by(TaskCatalogItem.source_account_user_id.asc(), TaskCatalogItem.task_id.asc())))
+    accounts = list(
+        db.scalars(
+            select(AidpAccount)
+            .where(AidpAccount.status != AccountStatus.DISABLED)
+            .order_by(AidpAccount.is_task_source.desc(), AidpAccount.user_id.asc())
+        )
+    )
+    task_query = select(TaskCatalogItem).where(TaskCatalogItem.visibility != TaskVisibility.HIDDEN)
+    active_sources, has_registered_sources = task_catalog_active_source_scope(db)
+    if has_registered_sources and not active_sources:
+        tasks = []
+    else:
+        if active_sources:
+            task_query = task_query.where(TaskCatalogItem.source_account_user_id.in_(active_sources))
+        tasks = list(db.scalars(task_query.order_by(TaskCatalogItem.source_account_user_id.asc(), TaskCatalogItem.task_id.asc())))
     task_source = get_task_source_account_user_id(db)
     tasks_by_account = _group_tasks_by_account(tasks)
     matrix = [_build_account_row(account, tasks_by_account.get(account.user_id, []), task_source) for account in accounts]

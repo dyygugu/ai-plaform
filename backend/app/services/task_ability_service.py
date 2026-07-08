@@ -19,10 +19,11 @@ from sqlalchemy.orm import Session
 
 from app.core.settings import get_settings
 from app.schemas.submitted_history import SubmittedHistorySampleRead, TestsetRead
-from app.models.task import TaskCatalogItem
+from app.models.task import TaskCatalogItem, TaskVisibility
 from app.services.learning_package_service import get_selected_learning_package_summary, list_task_learning_packages, resolve_learning_package_id
 from app.schemas.task_ability import TaskAbilityDraftCreateRequest, TaskAbilityDraftListResponse, TaskAbilityDraftRead
 from app.services.ai_service import get_system_ai_runtime_prompt, get_task_ai_runtime_prompt
+from app.services.task_service import task_catalog_active_source_scope
 from app.services.production_dashboard_service import create_browser_open_session
 from app.services.submitted_history_service import get_submitted_history_sample, read_testset
 from app.services.task_capability_service import TaskCapabilityError, build_http_question_context
@@ -1900,7 +1901,13 @@ def _build_live_question_context(db: Optional[Session], draft: dict[str, Any], s
     if db is None:
         return None
     task_id = str(draft.get("task_id") or "")
-    item = db.execute(select(TaskCatalogItem).where(TaskCatalogItem.task_id == task_id).order_by(TaskCatalogItem.updated_at.desc())).scalars().first()
+    query = select(TaskCatalogItem).where(TaskCatalogItem.task_id == task_id, TaskCatalogItem.visibility != TaskVisibility.HIDDEN)
+    active_sources, has_registered_sources = task_catalog_active_source_scope(db)
+    if has_registered_sources and not active_sources:
+        return None
+    if active_sources:
+        query = query.where(TaskCatalogItem.source_account_user_id.in_(active_sources))
+    item = db.execute(query.order_by(TaskCatalogItem.updated_at.desc())).scalars().first()
     if item is None:
         return None
     try:

@@ -5,7 +5,7 @@ from app.models.account import AccountStatus
 from app.services.production_dashboard_service import _account_is_stale, _global_warning, _load_monitor_state, _status, _task_stat, _warning
 
 
-def test_restored_account_with_successful_http_task_counts_is_not_stale() -> None:
+def test_restored_account_with_successful_http_task_counts_is_stale_until_refresh() -> None:
     source = {
         "name": "用户22449629285",
         "source": "http",
@@ -36,12 +36,12 @@ def test_restored_account_with_successful_http_task_counts_is_not_stale() -> Non
     stale = _account_is_stale(source)
     task = _task_stat(source["tasks"][0], stale)
 
-    assert stale is False
-    assert task.stale is False
-    assert task.processing == 3
-    assert task.in_progress == 2
+    assert stale is True
+    assert task.stale is True
+    assert task.processing == 0
+    assert task.in_progress == 0
     assert task.pending == 0
-    assert _warning("用户22449629285", source, stale) == ""
+    assert "任务数字可能是旧缓存" in _warning("用户22449629285", source, stale)
 
 
 def test_successful_refresh_clears_legacy_needs_relogin_for_dashboard_status() -> None:

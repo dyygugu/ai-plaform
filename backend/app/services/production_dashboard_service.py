@@ -415,9 +415,11 @@ def _host_profile_url(user_id: str, source: dict[str, Any]) -> str:
 def _account_is_stale(source: dict[str, Any]) -> bool:
     if source.get("error"):
         return True
+    if source.get("refreshStatus") == "restored":
+        return True
     if _has_successful_http_task_counts(source):
         return False
-    return bool(source.get("stale") or source.get("refreshStatus") == "restored")
+    return bool(source.get("stale"))
 
 
 def _has_successful_http_task_counts(source: dict[str, Any]) -> bool:

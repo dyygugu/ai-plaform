@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from app.core.paths import resolve_runtime_path
 from app.core.settings import get_settings
 from app.models.account import AccountStatus, AidpAccount
+from app.models.task import TaskCatalogItem, TaskVisibility
 from app.schemas.production import AccountRecycleActionResponse, DeletedProductionAccountRead
 from app.services.task_rules import utc_now
 
@@ -69,11 +70,12 @@ def delete_account(db: Session, user_id: str) -> AccountRecycleActionResponse:
 
     if db_account is not None:
         db_account.status = AccountStatus.DISABLED
-        db.flush()
+    hidden_task_count = _hide_recycled_account_tasks(db, normalized)
+    db.flush()
 
     _write_store(production_path, production_store)
     _write_store(session_path, session_store)
-    return AccountRecycleActionResponse(ok=True, user_id=normalized, message="账号已移入回收站，Cookie 和本机 profile 未清理。")
+    return AccountRecycleActionResponse(ok=True, user_id=normalized, message=f"账号已移入回收站，Cookie 和本机 profile 未清理；已隐藏该账号任务目录 {hidden_task_count} 条。")
 
 
 def restore_account(db: Session, user_id: str) -> AccountRecycleActionResponse:
@@ -90,8 +92,10 @@ def restore_account(db: Session, user_id: str) -> AccountRecycleActionResponse:
     restored = dict(deleted)
     for key in ("deletedAt", "deletedBy", "deleteReason"):
         restored.pop(key, None)
+    _clear_restored_account_runtime_cache(restored)
     restored["userId"] = normalized
     restored["enabled"] = True
+    restored["stale"] = True
     restored["restoredAt"] = utc_now().isoformat()
     restored["refreshStatus"] = "restored"
     _upsert_active_account(session_store, restored)
@@ -109,11 +113,52 @@ def restore_account(db: Session, user_id: str) -> AccountRecycleActionResponse:
         db_account.status = AccountStatus.STALE
         if not db_account.display_name:
             db_account.display_name = _display_name(restored, normalized)
+    restored_task_count = _restore_recycled_account_tasks(db, normalized)
     db.flush()
 
     _write_store(production_path, production_store)
     _write_store(session_path, session_store)
-    return AccountRecycleActionResponse(ok=True, user_id=normalized, message="账号已从回收站恢复，请按需刷新账号数据。")
+    return AccountRecycleActionResponse(ok=True, user_id=normalized, message=f"账号已从回收站恢复，请按需刷新账号数据；已恢复任务目录 {restored_task_count} 条为待校准状态。")
+
+
+def _hide_recycled_account_tasks(db: Session, user_id: str) -> int:
+    rows = list(db.scalars(select(TaskCatalogItem).where(TaskCatalogItem.source_account_user_id == user_id)))
+    for row in rows:
+        row.visibility = TaskVisibility.HIDDEN
+        row.last_task_page_error = "来源账号已移入回收站；该账号独有任务默认隐藏，恢复账号或重新刷新后再参与展示。"
+    return len(rows)
+
+
+def _restore_recycled_account_tasks(db: Session, user_id: str) -> int:
+    rows = list(db.scalars(select(TaskCatalogItem).where(TaskCatalogItem.source_account_user_id == user_id)))
+    for row in rows:
+        if row.visibility == TaskVisibility.HIDDEN:
+            row.visibility = TaskVisibility.RESTORED
+        row.pending_raw = ""
+        row.task_status_raw = "待刷新"
+        row.last_task_page_seen_at = None
+        row.last_task_page_error = "账号已从回收站恢复；请刷新生产数据后确认当前真实待处理。"
+    return len(rows)
+
+
+def _clear_restored_account_runtime_cache(account: dict[str, Any]) -> None:
+    for key in (
+        "tasks",
+        "taskStats",
+        "task_stats",
+        "taskSummary",
+        "income",
+        "lastRefreshStartedAt",
+        "lastRefreshFinishedAt",
+        "lastSyncedAt",
+        "nextRefreshAt",
+        "savedAt",
+        "lastTaskPageSeenAt",
+        "lastTaskPageError",
+        "refreshError",
+        "error",
+    ):
+        account.pop(key, None)
 
 
 def _load_store(path: Path) -> dict[str, Any]:

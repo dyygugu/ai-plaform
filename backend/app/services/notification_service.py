@@ -129,8 +129,8 @@ def read_notification_config() -> dict[str, Any]:
         config["source"] = "env"
     if settings.feishu_secret:
         config["secret"] = settings.feishu_secret
-    if "AIDP_NOTIFY_ENABLED" in os.environ:
-        config["enabled"] = bool(settings.notify_enabled)
+    if "AIDP_NOTIFY_ENABLED" in os.environ and bool(settings.notify_enabled):
+        config["enabled"] = True
     if settings.notify_dry_run:
         config["dryRun"] = True
     config["events"] = _normalize_events(config.get("events"))

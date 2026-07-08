@@ -264,6 +264,25 @@ class HumanReadableNotificationTests(unittest.TestCase):
         self.assertTrue(result.skipped)
         self.assertEqual(result.reason, "通知未启用。")
 
+    def test_saved_config_can_enable_notification_when_default_env_switch_is_false(self) -> None:
+        os.environ["AIDP_NOTIFY_ENABLED"] = "false"
+        get_settings.cache_clear()
+
+        status = notification_service.update_notification_config(
+            NotificationConfigUpdate(
+                enabled=True,
+                webhook_url="https://open.feishu.cn/open-apis/bot/v2/hook/WEBHOOK_SECRET_TOKEN",
+                secret="sign-secret",
+                min_level="warn",
+                dry_run=False,
+                cooldown_seconds=300,
+            )
+        )
+
+        self.assertTrue(status.enabled)
+        self.assertTrue(status.webhook_configured)
+        self.assertTrue(status.sends_network)
+
     def test_failed_status_is_urgent_not_general(self) -> None:
         alert = build_alert_message(
             "发布门禁未通过",

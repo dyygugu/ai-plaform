@@ -11,7 +11,7 @@ from app.core.settings import get_settings
 from app.models.account import AccountStatus, AidpAccount
 from app.models.audit import AuditLog, AuditSeverity
 from app.models.ops import EarningsSnapshot
-from app.models.task import TaskCatalogItem
+from app.models.task import TaskCatalogItem, TaskVisibility
 from app.models.worker import Worker
 from app.schemas.data_quality import (
     DataQualityCheckItem,
@@ -24,6 +24,7 @@ from app.schemas.data_quality import (
 from app.services.api_paths import api_path, api_paths
 from app.services.audit_service import write_audit
 from app.services.earnings_service import list_earnings
+from app.services.task_service import task_catalog_active_source_scope
 from app.services.task_rules import utc_now
 
 EXPECTED_ACCOUNT_COUNT = 7
@@ -32,7 +33,7 @@ EXPECTED_ACCOUNT_COUNT = 7
 def build_data_quality_summary(db: Session) -> DataQualitySummaryResponse:
     settings = get_settings()
     accounts = list(db.scalars(select(AidpAccount).order_by(AidpAccount.user_id.asc())))
-    tasks = list(db.scalars(select(TaskCatalogItem).order_by(TaskCatalogItem.task_id.asc())))
+    tasks = _user_facing_task_catalog_rows(db, order_by_task_id=True)
     earnings_rows = list_earnings(db)
     workers = list(db.scalars(select(Worker).order_by(Worker.worker_id.asc())))
     audit_count = int(db.scalar(select(func.count(AuditLog.id))) or 0)
@@ -149,7 +150,7 @@ def list_data_quality_checks(db: Session) -> list[DataQualityCheckItem]:
 def export_data_quality_workbook(db: Session) -> DataQualityExportResponse:
     summary = build_data_quality_summary(db)
     accounts = list(db.scalars(select(AidpAccount).order_by(AidpAccount.user_id.asc())))
-    tasks = list(db.scalars(select(TaskCatalogItem).order_by(TaskCatalogItem.source_account_user_id.asc(), TaskCatalogItem.task_id.asc())))
+    tasks = _user_facing_task_catalog_rows(db, order_by_task_id=False)
     earnings_rows = list_earnings(db)
     export_root = _reports_root() / "exports"
     export_root.mkdir(parents=True, exist_ok=True)
@@ -179,6 +180,20 @@ def export_data_quality_workbook(db: Session) -> DataQualityExportResponse:
         metadata={"cookie_copy_enabled": False, "manual_domain_switch_deferred": True},
         message="数据质量 Excel 已导出；覆盖 7 账号、任务简称、待处理数字、时间戳和证据路径。",
     )
+
+
+def _user_facing_task_catalog_rows(db: Session, *, order_by_task_id: bool) -> list[TaskCatalogItem]:
+    query = select(TaskCatalogItem).where(TaskCatalogItem.visibility != TaskVisibility.HIDDEN)
+    active_sources, has_registered_sources = task_catalog_active_source_scope(db)
+    if has_registered_sources and not active_sources:
+        return []
+    if active_sources:
+        query = query.where(TaskCatalogItem.source_account_user_id.in_(active_sources))
+    if order_by_task_id:
+        query = query.order_by(TaskCatalogItem.task_id.asc())
+    else:
+        query = query.order_by(TaskCatalogItem.source_account_user_id.asc(), TaskCatalogItem.task_id.asc())
+    return list(db.scalars(query))
 
 
 def create_data_quality_report(db: Session, request: DataQualityReportRequest) -> DataQualityReportResponse:

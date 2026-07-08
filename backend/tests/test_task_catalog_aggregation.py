@@ -8,7 +8,8 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
 from app.db.base import Base
-from app.models.task import TaskCatalogItem
+from app.models.account import AccountStatus, AidpAccount
+from app.models.task import TaskCatalogItem, TaskVisibility
 from app.services.task_service import list_task_catalog
 
 
@@ -61,6 +62,57 @@ def test_default_catalog_lists_all_accounts_and_deduplicates_task_id() -> None:
         assert [item.task_id for item in items] == ["task-1", "task-2"]
         assert items[0].source_account_user_id == "account-b"
         assert items[0].pending_raw == "9"
+    finally:
+        db.close()
+
+
+def test_default_catalog_excludes_disabled_account_only_tasks() -> None:
+    db = _session()
+    try:
+        db.add(AidpAccount(user_id="account-active", display_name="活跃账号", status=AccountStatus.ACTIVE, auth_mode="client-cookie"))
+        db.add(AidpAccount(user_id="account-disabled", display_name="回收账号", status=AccountStatus.DISABLED, auth_mode="client-cookie"))
+        db.add(_task("account-active", "task-shared", "3", "共享任务"))
+        db.add(_task("account-disabled", "task-shared", "9", "共享任务"))
+        db.add(_task("account-disabled", "task-disabled-only", "8", "回收账号独有任务"))
+        db.commit()
+
+        items = list_task_catalog(db)
+
+        assert [item.task_id for item in items] == ["task-shared"]
+        assert items[0].source_account_user_id == "account-active"
+    finally:
+        db.close()
+
+
+def test_default_catalog_excludes_legacy_visible_disabled_account_tasks() -> None:
+    db = _session()
+    try:
+        db.add(AidpAccount(user_id="account-disabled", display_name="回收账号", status=AccountStatus.DISABLED, auth_mode="client-cookie"))
+        db.add(_task("account-disabled", "task-disabled-only", "8", "回收账号独有任务"))
+        db.commit()
+
+        items = list_task_catalog(db)
+
+        assert items == []
+    finally:
+        db.close()
+
+
+def test_default_catalog_keeps_restored_tasks_out_of_verified_pending_view() -> None:
+    db = _session()
+    try:
+        db.add(AidpAccount(user_id="account-active", display_name="活跃账号", status=AccountStatus.ACTIVE, auth_mode="client-cookie"))
+        restored = _task("account-active", "task-restored", "", "恢复待校准任务")
+        restored.visibility = TaskVisibility.RESTORED
+        restored.last_task_page_error = "账号已从回收站恢复；请刷新生产数据后确认当前真实待处理。"
+        db.add(restored)
+        db.commit()
+
+        items = list_task_catalog(db)
+
+        assert [item.task_id for item in items] == ["task-restored"]
+        assert items[0].pending_raw == ""
+        assert items[0].last_task_page_error
     finally:
         db.close()
 

@@ -12,9 +12,10 @@ from app.models.audit import AuditLog
 from app.models.backup import BackupJob
 from app.models.ops import EarningsSnapshot, RestoreDrill
 from app.models.score_loop import ScoreLoopCase
-from app.models.task import RuntimeConfig, TaskCatalogEvent, TaskCatalogItem, TaskRuleConfig
+from app.models.task import RuntimeConfig, TaskCatalogEvent, TaskCatalogItem, TaskRuleConfig, TaskVisibility
 from app.models.worker import Worker, WorkerEvent, WorkerEventType, WorkerStatus
 from app.schemas.worker import WorkerEventReportRequest
+from app.services.account_coverage_service import build_account_coverage_summary
 from app.services.data_quality_service import build_data_quality_summary
 from app.services.final_acceptance_service import build_final_acceptance_matrix
 from app.services.ops_risk_service import build_fault_diagnosis, build_operational_risk_summary
@@ -55,6 +56,47 @@ class OperationalRiskAdjustmentTests(unittest.TestCase):
             self.assertEqual(account_check.status, "passed")
             self.assertEqual(summary.account_count, 7)
             self.assertIn("停用/非生产 2 个", account_check.actual)
+        finally:
+            db.close()
+
+    def test_user_facing_task_quality_ignores_recycled_catalog_rows(self) -> None:
+        db = _session()
+        try:
+            active_id = "7630778503730253600"
+            disabled_id = "7630778503730253699"
+            db.add(_account(active_id, AccountStatus.ACTIVE))
+            db.add(_account(disabled_id, AccountStatus.DISABLED))
+            db.add(
+                TaskCatalogItem(
+                    source_account_user_id=active_id,
+                    raw_task_name="活跃任务 task-active",
+                    task_short_name="活跃任务",
+                    task_id="task-active",
+                    task_name_id="活跃任务task-active",
+                    pending_raw="3",
+                    task_status_raw="进行中",
+                )
+            )
+            db.add(
+                TaskCatalogItem(
+                    source_account_user_id=disabled_id,
+                    raw_task_name="回收任务 task-disabled",
+                    task_short_name="回收任务",
+                    task_id="task-disabled",
+                    task_name_id="回收任务task-disabled",
+                    pending_raw="9",
+                    task_status_raw="进行中",
+                    visibility=TaskVisibility.VISIBLE,
+                )
+            )
+            db.commit()
+
+            quality = build_data_quality_summary(db)
+            coverage = build_account_coverage_summary(db)
+
+            self.assertEqual(quality.task_count, 1)
+            self.assertEqual([item.task_id for item in coverage.task_items], ["task-active"])
+            self.assertEqual([row.user_id for row in coverage.matrix], [active_id])
         finally:
             db.close()
 
