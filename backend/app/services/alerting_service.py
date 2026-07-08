@@ -98,7 +98,7 @@ BUILTIN_ALERT_RULES = [
         source="score-loop.cases",
         silence_minutes=30,
         description="插件或 Worker 发现未知题型时暂停样本，避免错误草稿和误提交。",
-        runbook_hint="打开题型规则与 AI 页面，补齐题型规则后再恢复；没有真题时不声明提交闭环完成。",
+        runbook_hint="打开 AI 标注能力工作台，补齐任务能力规则后再恢复；没有真题时不声明提交闭环完成。",
     ),
     AlertRuleRead(
         key="score_review_backlog",
@@ -304,7 +304,7 @@ def _build_incidents(db: Session, slo: SloSummaryResponse) -> list[AlertIncident
         elif indicator.key == "score_submit_confirmations":
             incidents.append(_incident("score_submit_confirmation_pending", "评分提交确认待处理", "warning", "评分题生产闭环", indicator.message, "打开 AI 页面处理 pending 确认项；批准只授权，不自动执行真实提交。", {"current": indicator.current, "evidence_path": "/ai"}))
         elif indicator.key == "score_unknown_types":
-            incidents.append(_incident("score_unknown_type_paused", "未知评分题型暂停", "warning", "题型识别", indicator.message, "打开题型规则页补规则；没有真题前不声明提交/回读完成。", {"current": indicator.current, "evidence_path": "/rules"}))
+            incidents.append(_incident("score_unknown_type_paused", "未知评分题型暂停", "warning", "题型识别", indicator.message, "打开 AI 标注能力工作台补规则；没有真题前不声明提交/回读完成。", {"current": indicator.current, "evidence_path": "/ability-workbench"}))
         elif indicator.key == "score_review_backlog":
             incidents.append(_incident("score_review_backlog", "评分样本待人工复核", "warning", "评分题生产闭环", indicator.message, "打开 AI 页面完成草稿、人工确认或驳回。", {"current": indicator.current, "evidence_path": "/ai"}))
     return incidents

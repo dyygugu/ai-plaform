@@ -35,12 +35,21 @@ function Get-AidpWorkerEventErrorCode {
   'WORKER_EXCEPTION'
 }
 
+function Get-ConfiguredWorkerId {
+  try {
+    $settings = Get-HelperSettings
+    $configured = [string](Get-MapValue $settings 'worker_id')
+    if ($configured.Trim()) { return $configured.Trim() }
+  } catch {}
+  'aidp-local-helper-' + ([Environment]::MachineName -replace '[^0-9A-Za-z_.-]', '-')
+}
+
 function Invoke-AidpWorkerEventReport {
   param([string]$Level = 'info', [string]$Event = 'event', [string]$Message = '', $Data = $null)
   try {
     $severity = if ($Level -match '^(error|critical)$') { 'error' } elseif ($Level -match '^(warn|warning)$') { 'warning' } else { 'info' }
     $payload = [ordered]@{
-      worker_id = 'aidp-local-helper'
+      worker_id = Get-ConfiguredWorkerId
       event_type = 'event_report'
       target_version = $script:HelperVersion
       severity = $severity

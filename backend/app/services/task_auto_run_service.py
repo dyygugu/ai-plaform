@@ -94,8 +94,8 @@ class TaskAutoRunBon8Adapter:
                 key="ability_published",
                 title="题型能力发布",
                 status="passed" if ability_draft else "blocked",
-                detail="bon8 已在题型能力库发布，可进入统一任务控制台。" if ability_draft else "bon8 还没有进入题型能力库已发布能力。",
-                next_step="" if ability_draft else "先让 bon8 进入题型能力库并处于有做题能力状态。",
+                detail="bon8 已在 AI 标注能力工作台发布，可进入统一任务控制台。" if ability_draft else "bon8 还没有进入 AI 标注能力工作台的已发布能力。",
+                next_step="" if ability_draft else "先让 bon8 进入 AI 标注能力工作台并处于有做题能力状态。",
             )
         ]
         if not account_ids:
@@ -166,7 +166,7 @@ class TaskAutoRunBon8Adapter:
             can_start=can_start,
             runnable_account_count=len(account_ids) if can_start else 0,
             checks=checks,
-            message="bon8 自检通过；已按题型能力库主流程接入统一任务控制台，当前只会处理已领取的处理中题。" if can_start else "bon8 自检发现阻塞项，未启动自动做题。",
+            message="bon8 自检通过；已按 AI 标注能力工作台主流程接入统一任务控制台，当前只会处理已领取的处理中题。" if can_start else "bon8 自检发现阻塞项，未启动自动做题。",
             next_step="可以启动 bon8 自动做题。" if can_start else "先确保所选账号都有 bon8 已领取的处理中题。",
         )
 
@@ -232,7 +232,7 @@ class TaskAutoRunResearchChartAdapter:
                     status="ability_not_enabled",
                     current_stage="题型能力未发布",
                     healthy=False,
-                    last_error="科研图题型能力尚未在题型能力库完成真实题审核并发布。",
+                    last_error="科研图题型能力尚未在 AI 标注能力工作台完成真实题审核并发布。",
                 )
                 for account_id in _normalize_account_ids(request.account_user_ids)
             ]
@@ -245,7 +245,7 @@ class TaskAutoRunResearchChartAdapter:
                 stop_requested=False,
                 accounts=accounts,
                 last_error="科研图题型能力未发布，不能启动自动做题。",
-                next_step="先到题型能力库完成草稿、真实题不提交审核并发布能力。",
+                next_step="先到 AI 标注能力工作台完成草稿、真实题不提交审核并发布能力。",
                 message="科研图自动做题被能力发布闸门阻止。",
                 raw_adapter_run={"adapter": self.adapter_key, "executor_status": "ability_not_enabled"},
             )
@@ -317,7 +317,7 @@ class TaskAutoRunResearchChartAdapter:
                 title="题型能力发布",
                 status="passed" if draft else "blocked",
                 detail="题型能力已发布，可读取最新版本。" if draft else "题型能力未发布或真实题审核未通过。",
-                next_step="" if draft else "先到题型能力库完成真实题不提交审核并发布能力。",
+                next_step="" if draft else "先到 AI 标注能力工作台完成真实题不提交审核并发布能力。",
             )
         )
         cookie_ok_count = 0
@@ -765,7 +765,7 @@ class TaskAutoRunResearchChartAdapter:
         if not draft:
             snapshot.status = "blocked"
             snapshot.last_error = "科研图题型能力已不可用，运行中自动做题已暂停。"
-            snapshot.next_step = "回到题型能力库重新发布能力后，再从任务操作台重启自动做题。"
+            snapshot.next_step = "回到 AI 标注能力工作台重新发布能力后，再从任务操作台重启自动做题。"
             snapshot.message = "科研图题型能力未发布或已撤回，已阻止继续使用旧版本执行。"
             snapshot.raw_adapter_run = {
                 **snapshot.raw_adapter_run,

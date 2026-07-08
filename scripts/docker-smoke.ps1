@@ -160,6 +160,12 @@ $rules = Invoke-RestMethod "$ApiBaseUrl/tasks/rules" -TimeoutSec 15
 if ($rules.prefix_rules.Count -lt 1) {
   throw "Task prefix rules are empty"
 }
+$abilityDrafts = Invoke-RestMethod "$ApiBaseUrl/task-abilities/drafts" -TimeoutSec 15
+$abilityRunGateReady = $false
+if ($catalog.items.Count -gt 0) {
+  $abilityRunGate = Invoke-RestMethod "$ApiBaseUrl/task-abilities/$($catalog.items[0].task_id)/run-gate" -TimeoutSec 15
+  $abilityRunGateReady = [bool]$abilityRunGate.task_id
+}
 
 [pscustomobject]@{
   docker_status = $containerStatus
@@ -193,7 +199,9 @@ if ($rules.prefix_rules.Count -lt 1) {
   task_count = $catalog.items.Count
   task_detail_ok = $detailOk
   prefix_rule_count = $rules.prefix_rules.Count
-  rule_center_versions = (Invoke-RestMethod "$ApiBaseUrl/rules/center" -TimeoutSec 15).versions.Count
+  ability_draft_count = $abilityDrafts.total
+  ability_run_gate_endpoint = "/task-abilities/{task_id}/run-gate"
+  ability_run_gate_checked = $abilityRunGateReady
   ops_job_count = (Invoke-RestMethod "$ApiBaseUrl/ops/jobs" -TimeoutSec 15).jobs.Count
   release_gate_ready = (Invoke-RestMethod "$ApiBaseUrl/ops/release-gate" -TimeoutSec 15).ready_for_manual_domain_switch
   scheduler_due_count = (Invoke-RestMethod "$ApiBaseUrl/ops/scheduler/plan" -TimeoutSec 15).due_count

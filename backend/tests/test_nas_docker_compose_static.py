@@ -111,6 +111,22 @@ def test_local_acceptance_scripts_send_auth_header_to_protected_apis() -> None:
     assert '"X-AIDP-API-Token"' in seed_local_sample
 
 
+def test_local_acceptance_scripts_do_not_check_removed_rule_center() -> None:
+    run_acceptance = (ROOT / "scripts" / "run-acceptance.ps1").read_text(encoding="utf-8")
+    docker_smoke = (ROOT / "scripts" / "docker-smoke.ps1").read_text(encoding="utf-8")
+
+    for script in (run_acceptance, docker_smoke):
+        assert "/rules/center" not in script
+        assert "/rules/versions" not in script
+        assert "rule_versions" not in script
+        assert "rule_publish_events" not in script
+        assert "rule_hit_stats" not in script
+        assert "/tasks/rules" in script
+        assert "/alerts/rules" in script
+        assert "/task-abilities/drafts" in script
+        assert "/task-abilities/{task_id}/run-gate" in script
+
+
 def test_user_visible_reports_follow_runtime_api_prefix() -> None:
     service_paths = [
         ROOT / "backend" / "app" / "services" / "api_paths.py",

@@ -12,7 +12,6 @@ from app.models.ai import AiJob
 from app.models.audit import AuditLog, AuditSeverity
 from app.models.backup import BackupJob, BackupStatus
 from app.models.ops_job import MaintenanceJobRun
-from app.models.rule import RuleHitStat, RulePublishEvent, RuleVersion, RuleVersionStatus
 from app.models.task import TaskCatalogItem
 from app.models.worker import Worker, WorkerEvent, WorkerStatus
 from app.schemas.observability import CollectorGuardResponse, ObservabilityMetric, ObservabilitySummary, ProbeResult, ProbeRunResponse, TimelineEvent
@@ -82,7 +81,7 @@ def _build_metrics(db: Session, collector_guard: CollectorGuardResponse) -> list
     backup_completed = db.query(BackupJob).filter(BackupJob.status == BackupStatus.COMPLETED).count()
     audit_errors = db.query(AuditLog).filter(AuditLog.severity.in_([AuditSeverity.ERROR, AuditSeverity.CRITICAL])).count()
     scheduler_runs = db.query(MaintenanceJobRun).count()
-    published_rules = db.query(RuleVersion).filter(RuleVersion.status == RuleVersionStatus.PUBLISHED).count()
+    ability_counts = _task_ability_counts()
     return [
         ObservabilityMetric(key="accounts", title="账号总数", value=account_total, status="warning" if account_needs_login else "passed", message=f"需登录关注 {account_needs_login} 个"),
         ObservabilityMetric(key="task_catalog", title="任务目录", value=task_total, status="passed" if task_total else "failed", message=f"采集守护状态：{collector_guard.status}"),
@@ -91,7 +90,7 @@ def _build_metrics(db: Session, collector_guard: CollectorGuardResponse) -> list
         ObservabilityMetric(key="backups", title="完成备份/清理", value=backup_completed, status="passed" if backup_completed else "warning", message="包含手动备份和清理记录"),
         ObservabilityMetric(key="audit_errors", title="严重审计", value=audit_errors, status="passed" if audit_errors == 0 else "failed", message="error/critical 审计数量"),
         ObservabilityMetric(key="scheduler_runs", title="调度运行", value=scheduler_runs, status="passed" if scheduler_runs else "warning", message="运维任务和调度 Tick 运行历史"),
-        ObservabilityMetric(key="published_rules", title="发布规则版本", value=published_rules, status="passed" if published_rules else "failed", message="规则中心 published 版本数"),
+        ObservabilityMetric(key="task_abilities", title="AI 标注能力", value=ability_counts["enabled"], status="passed" if ability_counts["enabled"] else "warning", message=f"草稿 {ability_counts['total']} 个，已启用 {ability_counts['enabled']} 个"),
     ]
 
 
@@ -101,7 +100,7 @@ def run_probes(db: Session, persist_audit: bool = True) -> ProbeRunResponse:
     results = [
         _probe_database(db),
         _probe_task_catalog(db),
-        _probe_rules(db),
+        _probe_ability_workbench(),
         _probe_worker(db),
         _probe_release_gate(db),
         _probe_collector_guard(db),
@@ -135,12 +134,13 @@ def _probe_task_catalog(db: Session) -> ProbeResult:
     return _timed_probe("task_catalog", "任务目录", check)
 
 
-def _probe_rules(db: Session) -> ProbeResult:
+def _probe_ability_workbench() -> ProbeResult:
     def check():
-        active = db.scalar(select(RuleVersion).where(RuleVersion.status == RuleVersionStatus.PUBLISHED).order_by(RuleVersion.id.desc()))
-        hits = db.query(RuleHitStat).count()
-        return ("passed" if active else "failed", active.version if active else "缺少发布规则", {"hit_stats": hits})
-    return _timed_probe("rules", "规则中心", check)
+        counts = _task_ability_counts()
+        status = "passed" if counts["enabled"] else "warning"
+        message = f"AI 标注能力工作台草稿 {counts['total']} 个，已启用 {counts['enabled']} 个。"
+        return (status, message, counts)
+    return _timed_probe("task_ability_workbench", "AI 标注能力工作台", check)
 
 
 def _probe_worker(db: Session) -> ProbeResult:
@@ -215,16 +215,15 @@ def list_timeline_events(db: Session, limit: int = 50) -> list[TimelineEvent]:
             target_type="backup",
             target_id=str(item.id),
         ))
-    for item in db.scalars(select(RulePublishEvent).order_by(RulePublishEvent.created_at.desc()).limit(limit)):
-        events.append(TimelineEvent(
-            id=f"rule-{item.id}",
-            source="rule",
-            severity="info",
-            title=item.action,
-            message=item.message,
-            trace_id=item.trace_id,
-            created_at=item.created_at,
-            target_type="rule_version",
-            target_id=str(item.rule_version_id),
-        ))
     return sorted(events, key=lambda item: item.created_at, reverse=True)[: max(1, min(limit, 200))]
+
+
+def _task_ability_counts() -> dict[str, int]:
+    try:
+        from app.services.task_ability_service import list_task_ability_drafts
+
+        drafts = list_task_ability_drafts().items
+    except Exception:
+        return {"total": 0, "enabled": 0}
+    enabled = sum(1 for item in drafts if item.capability_enabled and item.flow_stage == "capability_enabled")
+    return {"total": len(drafts), "enabled": enabled}

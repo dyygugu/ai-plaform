@@ -34,7 +34,7 @@ def _reports_root() -> Path:
     return Path(settings.task_sample_root).resolve().parent / "reports"
 
 SCREENSHOT_KEYS = [
-    ("p7_rules", "P7 规则中心", "aidp-monitor-next-p7-rules.png"),
+    ("p7_ability_workbench", "P7 AI 标注能力工作台", "aidp-monitor-next-p7-rules.png"),
     ("p7_workers", "P7 Worker 管理", "aidp-monitor-next-p7-workers-seeded.png"),
     ("p8_ops", "P8 运维中枢", "aidp-monitor-next-p8-ops.png"),
     ("p9_production", "P9 生产护栏", "aidp-monitor-next-p9-production.png"),
@@ -57,7 +57,7 @@ API_GROUPS = [
     "tasks/task-source/task-rules",
     "backups/restore-drills",
     "ai/workers/earnings",
-    "rules/ops/scheduler",
+    "task-abilities/ops/scheduler",
     "observability/probes/timeline",
     "alerts/slo/evaluate",
     "delivery/checklist/bundle",

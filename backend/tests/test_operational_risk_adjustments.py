@@ -19,6 +19,7 @@ from app.services.data_quality_service import build_data_quality_summary
 from app.services.final_acceptance_service import build_final_acceptance_matrix
 from app.services.ops_risk_service import build_fault_diagnosis, build_operational_risk_summary
 from app.services.score_loop_service import capture_score_case, create_ai_draft, review_score_case
+from app.services import worker_service
 from app.services.worker_service import report_worker_event
 from app.schemas.score_loop import ScoreLoopCaptureRequest, ScoreLoopDraftRequest, ScoreLoopReviewRequest
 from app.schemas.task import TaskCatalogRefreshRequest
@@ -160,6 +161,46 @@ class OperationalRiskAdjustmentTests(unittest.TestCase):
             self.assertEqual(replay.duration_ms, 1234)
         finally:
             db.close()
+
+    def test_worker_structured_log_payload_flows_into_notification_data(self) -> None:
+        db = _session()
+        calls: list[dict[str, object]] = []
+        original_send = worker_service.send_error_notification
+
+        def _fake_send(**kwargs):
+            calls.append(kwargs)
+
+        worker_service.send_error_notification = _fake_send
+        try:
+            report_worker_event(db, WorkerEventReportRequest(
+                worker_id="task-worker-1",
+                event_type="event_report",
+                account_user_id="7630778503730253600",
+                task_id="score-task-88",
+                severity="error",
+                stage="ai_draft",
+                step="call_provider",
+                error_code="AI_PROVIDER_502",
+                error_detail="502 Bad Gateway",
+                retryable=True,
+                duration_ms=1234,
+                message="做题 AI 草稿生成失败",
+            ))
+        finally:
+            worker_service.send_error_notification = original_send
+            db.close()
+
+        self.assertEqual(len(calls), 1)
+        data = calls[0]["data"]
+        self.assertEqual(data["worker_id"], "task-worker-1")
+        self.assertEqual(data["account_user_id"], "7630778503730253600")
+        self.assertEqual(data["task_id"], "score-task-88")
+        self.assertEqual(data["stage"], "ai_draft")
+        self.assertEqual(data["step"], "call_provider")
+        self.assertEqual(data["error_code"], "AI_PROVIDER_502")
+        self.assertEqual(data["error_detail"], "502 Bad Gateway")
+        self.assertTrue(data["retryable"])
+        self.assertEqual(data["duration_ms"], 1234)
 
     def test_worker_event_contract_rejects_unknown_stage_step_and_error_code(self) -> None:
         valid = WorkerEventReportRequest(

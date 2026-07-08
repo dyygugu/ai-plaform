@@ -280,7 +280,7 @@ def _steps_for_key(key: str) -> list[str]:
         "backup_missing": ["打开备份恢复页执行手动备份。", "确认备份记录为 completed。", "将备份路径写入最终验收矩阵。"],
         "audit_errors_present": ["打开权限审计页按 trace_id 筛查。", "确认 error/critical 原因与影响面。", "记录处置结果后再进入最终验收。"],
         "score_submit_confirmation_pending": ["打开 AI 页面查看高危动作确认队列。", "批准或驳回评分提交确认；批准只授权，不自动提交。", "处理后刷新异常处置页确认 pending=0。"],
-        "score_unknown_type_paused": ["打开题型规则页记录未知题型特征。", "补齐题型识别规则和人工确认说明。", "没有真实题前只完成规则和告警闭环，不声明提交/回读完成。"],
+        "score_unknown_type_paused": ["打开 AI 标注能力工作台记录未知题型特征。", "补齐题型识别规则和人工确认说明。", "没有真实题前只完成规则和告警闭环，不声明提交/回读完成。"],
         "score_review_backlog": ["打开 AI 页面查看评分样本表。", "对 captured 样本生成草稿，对 draft_ready 样本人工确认或驳回。", "真实提交仍必须进入高危确认队列。"],
     }
     return steps.get(key, ["查看相关页面证据。", "按推荐动作处理。", "重新生成本地闭环记录。"])
@@ -296,7 +296,7 @@ def _evidence_for_rule(key: str) -> str:
         "audit_errors_present": "/security",
         "data_quality_mismatch": "/data-quality",
         "score_submit_confirmation_pending": "/ai",
-        "score_unknown_type_paused": "/rules",
+        "score_unknown_type_paused": "/ability-workbench",
         "score_review_backlog": "/ai",
     }
     return evidence.get(key, "/alerts")

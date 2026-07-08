@@ -66,10 +66,10 @@ main = importlib.import_module('app.main')
 fastapi_app = main.app
 from app.db.base import Base
 import app.db.models
-expected={'aidp_accounts','task_catalog_items','audit_logs','backup_jobs','ai_jobs','workers','rule_versions','rule_publish_events','rule_hit_stats','worker_events','maintenance_job_runs'}
+expected={'aidp_accounts','task_catalog_items','task_rule_configs','audit_logs','backup_jobs','ai_jobs','workers','worker_events','maintenance_job_runs'}
 assert expected.issubset(set(Base.metadata.tables.keys()))
 routes=sorted(route.path for route in fastapi_app.routes if hasattr(route, 'path'))
-for path in ['$ApiPrefix/health','$ApiPrefix/accounts','$ApiPrefix/accounts/login-slots','$ApiPrefix/accounts/login-slots/new','$ApiPrefix/accounts/{user_id}/login-slots/relogin','$ApiPrefix/accounts/client-session','/api/client-session','$ApiPrefix/accounts/legacy-migration/preview','$ApiPrefix/accounts/legacy-migration/run','$ApiPrefix/accounts/task-coverage/summary','$ApiPrefix/accounts/task-coverage/matrix','$ApiPrefix/accounts/task-coverage/baseline','$ApiPrefix/data-quality/summary','$ApiPrefix/data-quality/checks','$ApiPrefix/data-quality/export','$ApiPrefix/data-quality/report','$ApiPrefix/incidents/summary','$ApiPrefix/incidents/runbooks','$ApiPrefix/incidents/close-loop','$ApiPrefix/final-acceptance/matrix','$ApiPrefix/final-acceptance/rollback','$ApiPrefix/final-acceptance/evidence','$ApiPrefix/roadmap-final/summary','$ApiPrefix/roadmap-final/report','$ApiPrefix/tasks/catalog','$ApiPrefix/tasks/catalog/{item_id}','$ApiPrefix/tasks/catalog/refresh','$ApiPrefix/tasks/rules','$ApiPrefix/tasks/task-page/sample-capture','$ApiPrefix/settings/runtime','$ApiPrefix/settings/task-source','$ApiPrefix/settings/permissions','$ApiPrefix/backups/plan','$ApiPrefix/backups/manual','$ApiPrefix/ai/queue','$ApiPrefix/workers','$ApiPrefix/workers/heartbeat','$ApiPrefix/workers/events','$ApiPrefix/workers/{worker_id}','$ApiPrefix/workers/{worker_id}/logs','$ApiPrefix/workers/{worker_id}/bind-account','$ApiPrefix/workers/{worker_id}/version','$ApiPrefix/workers/{worker_id}/claim-task','$ApiPrefix/rules/center','$ApiPrefix/rules/versions','$ApiPrefix/rules/versions/{version_id}/diff','$ApiPrefix/rules/versions/{version_id}/canary','$ApiPrefix/rules/versions/{version_id}/publish','$ApiPrefix/rules/versions/{version_id}/rollback','$ApiPrefix/alerts/preview','$ApiPrefix/alerts/rules','$ApiPrefix/alerts/slo','$ApiPrefix/alerts/summary','$ApiPrefix/alerts/evaluate','$ApiPrefix/delivery/summary','$ApiPrefix/delivery/checklist','$ApiPrefix/delivery/bundle','$ApiPrefix/inspection/summary','$ApiPrefix/inspection/checklist','$ApiPrefix/inspection/run','$ApiPrefix/freeze/summary','$ApiPrefix/freeze/checklist','$ApiPrefix/freeze/baseline','$ApiPrefix/restore-drills/run','$ApiPrefix/earnings/summary','$ApiPrefix/earnings/export','$ApiPrefix/ops/jobs','$ApiPrefix/ops/jobs/{job_key}/run','$ApiPrefix/ops/release-gate','$ApiPrefix/ops/scheduler/plan','$ApiPrefix/ops/scheduler/tick','$ApiPrefix/ops/domain-switch-runbook','$ApiPrefix/observability/summary','$ApiPrefix/observability/collector-guard','$ApiPrefix/observability/timeline','$ApiPrefix/observability/probes/run','$ApiPrefix/audit/logs']:
+for path in ['$ApiPrefix/health','$ApiPrefix/accounts','$ApiPrefix/accounts/login-slots','$ApiPrefix/accounts/login-slots/new','$ApiPrefix/accounts/{user_id}/login-slots/relogin','$ApiPrefix/accounts/client-session','/api/client-session','$ApiPrefix/accounts/legacy-migration/preview','$ApiPrefix/accounts/legacy-migration/run','$ApiPrefix/accounts/task-coverage/summary','$ApiPrefix/accounts/task-coverage/matrix','$ApiPrefix/accounts/task-coverage/baseline','$ApiPrefix/data-quality/summary','$ApiPrefix/data-quality/checks','$ApiPrefix/data-quality/export','$ApiPrefix/data-quality/report','$ApiPrefix/incidents/summary','$ApiPrefix/incidents/runbooks','$ApiPrefix/incidents/close-loop','$ApiPrefix/final-acceptance/matrix','$ApiPrefix/final-acceptance/rollback','$ApiPrefix/final-acceptance/evidence','$ApiPrefix/roadmap-final/summary','$ApiPrefix/roadmap-final/report','$ApiPrefix/tasks/catalog','$ApiPrefix/tasks/catalog/{item_id}','$ApiPrefix/tasks/catalog/refresh','$ApiPrefix/tasks/rules','$ApiPrefix/tasks/task-page/sample-capture','$ApiPrefix/task-abilities/drafts','$ApiPrefix/task-abilities/{task_id}/run-gate','$ApiPrefix/settings/runtime','$ApiPrefix/settings/task-source','$ApiPrefix/settings/permissions','$ApiPrefix/backups/plan','$ApiPrefix/backups/manual','$ApiPrefix/ai/queue','$ApiPrefix/workers','$ApiPrefix/workers/heartbeat','$ApiPrefix/workers/events','$ApiPrefix/workers/{worker_id}','$ApiPrefix/workers/{worker_id}/logs','$ApiPrefix/workers/{worker_id}/bind-account','$ApiPrefix/workers/{worker_id}/version','$ApiPrefix/workers/{worker_id}/claim-task','$ApiPrefix/alerts/preview','$ApiPrefix/alerts/rules','$ApiPrefix/alerts/slo','$ApiPrefix/alerts/summary','$ApiPrefix/alerts/evaluate','$ApiPrefix/delivery/summary','$ApiPrefix/delivery/checklist','$ApiPrefix/delivery/bundle','$ApiPrefix/inspection/summary','$ApiPrefix/inspection/checklist','$ApiPrefix/inspection/run','$ApiPrefix/freeze/summary','$ApiPrefix/freeze/checklist','$ApiPrefix/freeze/baseline','$ApiPrefix/restore-drills/run','$ApiPrefix/earnings/summary','$ApiPrefix/earnings/export','$ApiPrefix/ops/jobs','$ApiPrefix/ops/jobs/{job_key}/run','$ApiPrefix/ops/release-gate','$ApiPrefix/ops/scheduler/plan','$ApiPrefix/ops/scheduler/tick','$ApiPrefix/ops/domain-switch-runbook','$ApiPrefix/observability/summary','$ApiPrefix/observability/collector-guard','$ApiPrefix/observability/timeline','$ApiPrefix/observability/probes/run','$ApiPrefix/audit/logs']:
     assert path in routes, path
 print('route_smoke_ok=true')
 "@ | python - | Tee-Object -Variable routeSmokeOutput | Out-Null
@@ -175,6 +175,8 @@ print('route_smoke_ok=true')
     "- $ApiPrefix/tasks/catalog/refresh",
     "- $ApiPrefix/tasks/rules",
     "- $ApiPrefix/tasks/task-page/sample-capture",
+    "- $ApiPrefix/task-abilities/drafts",
+    "- $ApiPrefix/task-abilities/{task_id}/run-gate",
     "- $ApiPrefix/settings/runtime",
     "- $ApiPrefix/settings/task-source",
     "- $ApiPrefix/settings/permissions",
@@ -189,12 +191,6 @@ print('route_smoke_ok=true')
     "- $ApiPrefix/workers/{worker_id}/bind-account",
     "- $ApiPrefix/workers/{worker_id}/version",
     "- $ApiPrefix/workers/{worker_id}/claim-task",
-    "- $ApiPrefix/rules/center",
-    "- $ApiPrefix/rules/versions",
-    "- $ApiPrefix/rules/versions/{version_id}/diff",
-    "- $ApiPrefix/rules/versions/{version_id}/canary",
-    "- $ApiPrefix/rules/versions/{version_id}/publish",
-    "- $ApiPrefix/rules/versions/{version_id}/rollback",
     "- $ApiPrefix/alerts/preview",
     "- $ApiPrefix/alerts/rules",
     "- $ApiPrefix/alerts/slo",
@@ -227,7 +223,7 @@ print('route_smoke_ok=true')
     "## 人工验收提醒",
     "",
     "- 先在测试环境验证，不切正式反代。",
-    "- 人工打开 $BaseUrl，应看到左侧 AIDP Monitor、标题 生产管理看板、首页、账号管理登录入口、待处理刷新控制、任务看板、统计报表、数据校验、规则中心、Worker 管理、运维中枢、生产护栏、观测中心、告警中心、运维证据分组和脱敏任务样本。",
+    "- 人工打开 $BaseUrl，应看到左侧 AIDP Monitor、标题 生产管理看板、首页、账号管理登录入口、待处理刷新控制、任务看板、统计报表、数据校验、AI 标注能力工作台、Worker 管理、运维中枢、生产护栏、观测中心、告警中心、运维证据分组和脱敏任务样本。",
     "- 删除候选仍只允许移动到 delete。"
   )
   $reportLines | Set-Content -Encoding utf8NoBOM $reportPath

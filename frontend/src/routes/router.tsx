@@ -14,7 +14,6 @@ import { IncidentsPage } from "../pages/IncidentsPage";
 import { OpsPage } from "../pages/OpsPage";
 import { ObservabilityPage } from "../pages/ObservabilityPage";
 import { ProductionPage } from "../pages/ProductionPage";
-import { RulesPage } from "../pages/RulesPage";
 import { SecurityPage } from "../pages/SecurityPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { TasksPage } from "../pages/TasksPage";
@@ -31,7 +30,6 @@ export const router = createBrowserRouter([
     { path: "data-quality", element: <DataQualityPage /> },
     { path: "ai", element: <AiPage /> },
     { path: "workers", element: <WorkersPage /> },
-    { path: "rules", element: <RulesPage /> },
     { path: "backups", element: <BackupsPage /> },
     { path: "ops", element: <OpsPage /> },
     { path: "production", element: <ProductionPage /> },

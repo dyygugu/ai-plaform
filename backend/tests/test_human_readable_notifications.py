@@ -61,6 +61,7 @@ class HumanReadableNotificationTests(unittest.TestCase):
             "AIDP_FEISHU_SECRET": os.environ.get("AIDP_FEISHU_SECRET"),
             "AIDP_NOTIFY_ENABLED": os.environ.get("AIDP_NOTIFY_ENABLED"),
             "AIDP_NOTIFY_DRY_RUN": os.environ.get("AIDP_NOTIFY_DRY_RUN"),
+            "AIDP_ALLOW_TEST_NOTIFICATION_SEND": os.environ.get("AIDP_ALLOW_TEST_NOTIFICATION_SEND"),
         }
         self._tmpdir = tempfile.TemporaryDirectory()
         os.environ["AIDP_PUBLIC_BASE_URL"] = "http://127.0.0.1:8789"
@@ -68,6 +69,7 @@ class HumanReadableNotificationTests(unittest.TestCase):
         os.environ["AIDP_NOTIFICATION_COOLDOWN_PATH"] = str(Path(self._tmpdir.name) / "notification-cooldown.json")
         for key in ("AIDP_FEISHU_WEBHOOK_URL", "AIDP_FEISHU_SECRET", "AIDP_NOTIFY_ENABLED", "AIDP_NOTIFY_DRY_RUN"):
             os.environ.pop(key, None)
+        os.environ["AIDP_ALLOW_TEST_NOTIFICATION_SEND"] = "true"
         get_settings.cache_clear()
 
     def tearDown(self) -> None:
@@ -103,6 +105,62 @@ class HumanReadableNotificationTests(unittest.TestCase):
         self.assertNotIn('"account_user_id"', text)
         self.assertNotIn("secret-token", text)
 
+    def test_ai_provider_502_notification_explains_upstream_detail(self) -> None:
+        text = notification_service._render_message(
+            "worker.error",
+            "error",
+            '{"error_code":"AI_PROVIDER_502","error_detail":"HTTP 502 Bad Gateway from dashscope"}',
+            "trace-ai-502",
+            {
+                "worker_id": "worker-a",
+                "task_id": "task-a",
+                "stage": "ai_draft",
+                "step": "call_provider",
+            },
+        )
+
+        self.assertIn("【一般】做题 AI 服务请求失败", text)
+        self.assertIn("问题出在：做题 AI 上游返回 502/Bad Gateway", text)
+        self.assertIn("HTTP 502 Bad Gateway from dashscope", text)
+        self.assertIn("影响：本次做题会暂停或等待重试", text)
+        self.assertIn("技术事件：AI_PROVIDER_502 / worker.error", text)
+
+    def test_ai_provider_timeout_notification_explains_upstream_timeout(self) -> None:
+        text = notification_service._render_message(
+            "worker.error",
+            "critical",
+            '{"error_code":"AI_PROVIDER_TIMEOUT","error_detail":"HTTPSConnectionPool(host=\'dashscope.aliyuncs.com\'): Read timed out. (read timeout=25)"}',
+            "trace-ai-timeout",
+            {"worker_id": "worker-a", "task_id": "task-a", "stage": "answer", "step": "call_provider"},
+        )
+
+        self.assertIn("【紧急】做题 AI 响应超时", text)
+        self.assertIn("问题出在：做题 AI 上游请求超时", text)
+        self.assertIn("Read timed out", text)
+        self.assertIn("现在要做：先观察是否自动恢复", text)
+
+    def test_web_login_rate_limit_notification_explains_login_failures(self) -> None:
+        text = notification_service._render_message(
+            "backend.error",
+            "warn",
+            "WEB_LOGIN_RATE_LIMIT",
+            "trace-login-rate-limit",
+            {
+                "error_code": "WEB_LOGIN_RATE_LIMIT",
+                "path": "/api/v1/auth/login",
+                "client_source": "203.0.113.10",
+                "phone_masked": "176****1914",
+            },
+        )
+
+        self.assertIn("【提醒】平台登录连续失败", text)
+        self.assertIn("问题出在：平台登录连续失败，系统已临时限流", text)
+        self.assertIn("176****1914", text)
+        self.assertIn("影响：只是登录入口被临时保护", text)
+        self.assertIn("现在要做：确认是否有人输错密码", text)
+        self.assertIn("技术事件：WEB_LOGIN_RATE_LIMIT / backend.error", text)
+        self.assertNotIn("平台内部服务异常", text)
+
     def test_alert_preview_uses_plain_language_sections(self) -> None:
         alert = build_alert_message(
             "采集连续失败",
@@ -136,6 +194,20 @@ class HumanReadableNotificationTests(unittest.TestCase):
         self.assertNotIn("secret-token", text)
         self.assertNotIn("sessionid=abc", text)
         self.assertNotIn('{"error_detail"', text)
+
+    def test_ai_provider_detail_redacts_standalone_provider_secrets(self) -> None:
+        text = notification_service._render_message(
+            "worker.error",
+            "error",
+            '{"error_code":"AI_PROVIDER_502","error_detail":"upstream rejected API key sk-test-secret-1234567890 and access AKIAABCDEFGHIJKLMNOP"}',
+            "trace-provider-secret",
+            {},
+        )
+
+        self.assertIn("问题出在：做题 AI 上游返回 502/Bad Gateway", text)
+        self.assertNotIn("sk-test-secret-1234567890", text)
+        self.assertNotIn("AKIAABCDEFGHIJKLMNOP", text)
+        self.assertIn("<redacted>", text)
 
     def test_error_code_effective_severity_controls_min_level(self) -> None:
         config_path = Path(self._tmpdir.name) / "notifications.json"
@@ -385,6 +457,49 @@ class HumanReadableNotificationTests(unittest.TestCase):
         self.assertEqual(duplicate.reason, "命中飞书通知冷却窗口。")
         self.assertEqual(len(sent_texts), 1)
 
+    def test_task_ai_provider_outage_uses_at_least_hour_cooldown(self) -> None:
+        config_path = Path(self._tmpdir.name) / "notifications.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "enabled": True,
+                    "provider": "feishu-webhook",
+                    "webhookUrl": "https://open.feishu.cn/webhook/test",
+                    "secret": "",
+                    "minLevel": "critical",
+                    "events": ["worker.error"],
+                    "dryRun": False,
+                    "cooldownSec": 300,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        message = '{"error_code":"AI_PROVIDER_502","error_detail":"HTTP 502 Bad Gateway"}'
+        data = {"worker_id": "worker-a", "account_user_id": "account-a", "task_id": "task-a"}
+        summary = notification_service._build_human_summary("worker.error", "critical", message, data)
+        key = notification_service._cooldown_key("worker.error", "critical", summary, data)
+        cooldown_path = Path(self._tmpdir.name) / "notification-cooldown.json"
+        cooldown_path.write_text(json.dumps({key: time.time() - 600}, ensure_ascii=False), encoding="utf-8")
+        notification_service.LAST_SENT.clear()
+        sent_texts: list[str] = []
+        original_send = notification_service._send_feishu_text
+        notification_service._send_feishu_text = lambda webhook, secret, text: sent_texts.append(text) or 200
+        try:
+            result = notification_service.send_error_notification(
+                event="worker.error",
+                level="critical",
+                message=message,
+                data=data,
+                trace_id="trace-provider-hour-cooldown",
+            )
+        finally:
+            notification_service._send_feishu_text = original_send
+
+        self.assertTrue(result.skipped)
+        self.assertEqual(result.reason, "命中飞书通知冷却窗口。")
+        self.assertEqual(sent_texts, [])
+
     def test_concurrent_task_ai_provider_outage_uses_single_real_send_cooldown_slot(self) -> None:
         config_path = Path(self._tmpdir.name) / "notifications.json"
         config_path.write_text(
@@ -577,6 +692,42 @@ class HumanReadableNotificationTests(unittest.TestCase):
 
         self.assertTrue(dry_run.dry_run)
         self.assertTrue(real.sent)
+
+    def test_pytest_blocks_real_feishu_network_send_unless_explicitly_allowed(self) -> None:
+        os.environ["AIDP_ALLOW_TEST_NOTIFICATION_SEND"] = "false"
+        config_path = Path(self._tmpdir.name) / "notifications.json"
+        config_path.write_text(
+            json.dumps(
+                {
+                    "enabled": True,
+                    "provider": "feishu-webhook",
+                    "webhookUrl": "https://open.feishu.cn/open-apis/bot/v2/hook/test",
+                    "secret": "",
+                    "minLevel": "warn",
+                    "events": ["worker.error"],
+                    "dryRun": False,
+                    "cooldownSec": 30,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        original_send = notification_service._send_feishu_text
+        notification_service._send_feishu_text = lambda webhook, secret, text: (_ for _ in ()).throw(AssertionError("pytest must not call real feishu sender"))
+        try:
+            result = notification_service.send_error_notification(
+                event="worker.error",
+                level="error",
+                message='{"error_code":"AI_PROVIDER_502","error_detail":"bad gateway"}',
+                data={"worker_id": "worker-test", "task_id": "task-test"},
+                trace_id="trace-pytest-block",
+            )
+        finally:
+            notification_service._send_feishu_text = original_send
+
+        self.assertFalse(result.sent)
+        self.assertTrue(result.skipped)
+        self.assertIn("测试环境", result.reason)
 
     def test_alert_evaluation_preview_uses_real_notification_renderer(self) -> None:
         incident = AlertIncident(

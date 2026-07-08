@@ -61,7 +61,9 @@ def test_production_control_drawer_static_contract() -> None:
     assert "无限" not in tasks
     assert "连续失败" in tasks
     assert "去能力工作台启动生产" in tasks
-    assert "去题型能力库制作" in tasks
+    assert "去 AI 标注能力工作台制作" in tasks
+    assert "题型能力库" not in tasks
+    assert 'href="/rules"' not in tasks
     assert "启动自动做题" not in tasks
     assert "批准首题审核" not in tasks
     assert "正式提交首题并进入自动做题" not in tasks

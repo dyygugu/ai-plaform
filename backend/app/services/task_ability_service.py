@@ -1291,7 +1291,7 @@ def _build_builtin_bon8_task_ability_draft() -> dict[str, Any]:
         "task_id": BON8_TASK_ID,
         "specific_rules": "bon8 严格执行 0/1/2 分打分、最佳产物唯一、必填评分理由与勾选项，不写额外审核/废弃备注。",
         "sample_data": "沿用 bon8 已跑通的评分与提交闭环；多模型 HTML 产物比较后输出 0/1/2 和理由。",
-        "related_content": "该能力由既有 bon8 生产链迁入题型能力库主流程；任务控制台统一按题型能力已发布来启动自动做题。",
+        "related_content": "该能力由既有 bon8 生产链迁入 AI 标注能力工作台主流程；任务控制台统一按题型能力已发布来启动自动做题。",
         "system_ai_draft": (
             "# bon8 做题能力草稿\n\n"
             "## 适用任务\n"
@@ -1313,7 +1313,7 @@ def _build_builtin_bon8_task_ability_draft() -> dict[str, Any]:
         ),
         "system_ai_trace_id": "",
         "provider_status": "migrated_from_bon8_production",
-        "next_step": "已迁入题型能力库主流程；任务控制台可统一执行端到端不提交和自动做题。",
+        "next_step": "已迁入 AI 标注能力工作台主流程；任务控制台可统一执行端到端不提交和自动做题。",
         "created_at": now,
         "updated_at": now,
         "flow_stage": "capability_enabled",
@@ -1321,7 +1321,7 @@ def _build_builtin_bon8_task_ability_draft() -> dict[str, Any]:
         "real_no_submit_review": {
             "review_status": "人工已通过",
             "stage": "迁移自 bon8 既有首题审核链",
-            "ui_review_hint": "bon8 已迁入题型能力库主流程；后续可在任务控制台先做端到端做题不提交，再决定是否正式启动自动做题。",
+            "ui_review_hint": "bon8 已迁入 AI 标注能力工作台主流程；后续可在任务控制台先做端到端做题不提交，再决定是否正式启动自动做题。",
         },
         "task_queue_snapshot": {},
     }

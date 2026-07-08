@@ -15,7 +15,6 @@ const menuItems: MenuProps["items"] = [
   { key: "/", icon: <DashboardOutlined />, label: <Link to="/">生产驾驶舱</Link> },
   { key: "/accounts", icon: <TeamOutlined />, label: <Link to="/accounts">账号与登录</Link> },
   { key: "/ability-workbench", icon: <RobotOutlined />, label: <Link to="/ability-workbench">AI标注能力工作台</Link> },
-  { key: "/rules", icon: <RobotOutlined />, label: <Link to="/rules">题型能力库</Link> },
   { key: "/tasks", icon: <UnorderedListOutlined />, label: <Link to="/tasks">任务与待处理</Link> },
   { key: "/earnings", icon: <BarChartOutlined />, label: <Link to="/earnings">收益监控</Link> },
   { key: "/ai", icon: <RobotOutlined />, label: <Link to="/ai">AI聊天/API配置</Link> },

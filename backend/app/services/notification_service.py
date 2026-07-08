@@ -33,6 +33,8 @@ AUTH_BEARER_PATTERN = re.compile(rf"(?P<prefix>[\"']?authorization[\"']?\s*[:=]\
 SECRET_PATTERN = re.compile(rf"(?P<prefix>[\"']?{SECRET_KEY_PATTERN}[\"']?\s*[:=]\s*[\"']?)[^\"',;\s，}}]+", re.IGNORECASE)
 FEISHU_HOOK_PATTERN = re.compile(r"(?P<prefix>/hook/)[^?\s]+", re.IGNORECASE)
 SIGNED_QUERY_PATTERN = re.compile(r"(?P<prefix>[?&]sign=)[^&\s]+", re.IGNORECASE)
+PROVIDER_KEY_PATTERN = re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{7,}\b")
+AWS_ACCESS_KEY_PATTERN = re.compile(r"\b(?:AKIA|ASIA)[A-Z0-9]{16}\b")
 LAST_SENT: dict[str, float] = {}
 COOLDOWN_LOCKS: dict[str, threading.Lock] = {}
 COOLDOWN_LOCKS_GUARD = threading.Lock()
@@ -92,6 +94,13 @@ KNOWN_ERROR_CODES = {
         "problem": "执行前安全检查没有通过，系统已阻止继续运行。",
         "impact": "相关任务不会继续自动做题或提交，避免错误扩大。",
         "action": "打开能力工作台或生产护栏，按阻断原因补齐审核、回读或授权。",
+    },
+    "WEB_LOGIN_RATE_LIMIT": {
+        "severity": "warn",
+        "title": "平台登录连续失败",
+        "problem": "平台登录连续失败，系统已临时限流；涉及账号 {account}。",
+        "impact": "只是登录入口被临时保护，不会直接影响已在运行的自动做题；连续失败可能说明有人输错密码或在尝试登录。",
+        "action": "确认是否有人输错密码；如果不是本人操作，先不要继续尝试，检查访问来源和账号安全。",
     },
 }
 
@@ -197,13 +206,15 @@ def send_error_notification(
     if not force and events and normalized_event not in events:
         return _result(False, False, True, False, effective_level, normalized_event, trace, "事件未列入通知白名单。")
     key = _cooldown_key(normalized_event, effective_level, summary, notification_data)
-    cooldown = int(config.get("cooldownSec") or 300)
+    cooldown = _effective_cooldown_seconds(config, summary)
     text = _render_summary(summary, trace)
     if bool(config.get("dryRun")):
         return _result(True, False, False, True, effective_level, normalized_event, trace, "dry-run：已生成飞书通知文本但未发送。")
     webhook = str(config.get("webhookUrl") or "").strip()
     if not webhook:
         return _result(False, False, True, False, effective_level, normalized_event, trace, "飞书 webhook 未配置。")
+    if _test_network_send_blocked(config):
+        return _result(False, False, True, False, effective_level, normalized_event, trace, "测试环境禁止真实飞书发送，已跳过本次外发。")
     with _cooldown_lock_for(key):
         try:
             with _cooldown_file_lock_for(key):
@@ -301,11 +312,17 @@ def _build_human_summary(event: str, level: str, message: str, data: dict[str, A
         code = _find_known_error_code(message)
     if code and code in KNOWN_ERROR_CODES:
         item = KNOWN_ERROR_CODES[code]
-        account = _first_text(data, "account_user_id", "account_id", "user_id") or "某个账号"
+        if code == "WEB_LOGIN_RATE_LIMIT":
+            account = _first_text(data, "phone_masked", "account_user_id", "account_id", "user_id") or "平台登录账号"
+        else:
+            account = _first_text(data, "account_user_id", "account_id", "user_id") or "某个账号"
+        detail = _first_text(data, "error_detail") or _first_text(structured, "error_detail")
+        stage = _first_text(data, "stage") or _first_text(structured, "stage")
+        step = _first_text(data, "step") or _first_text(structured, "step")
         return {
             "title": item["title"],
             "severity": _max_level(normalized_level, item["severity"]),
-            "problem": item["problem"].format(account=account),
+            "problem": _known_error_problem(code, item["problem"].format(account=account), detail, stage, step),
             "impact": item["impact"],
             "action": item["action"],
             "technical_event": f"{code} / {event}",
@@ -422,6 +439,43 @@ def _cooldown_key(event: str, level: str, summary: dict[str, str], data: dict[st
 def _is_task_ai_provider_outage(summary: dict[str, str]) -> bool:
     technical_event = str(summary.get("technical_event") or "")
     return technical_event.startswith("AI_PROVIDER_")
+
+
+def _effective_cooldown_seconds(config: dict[str, Any], summary: dict[str, str]) -> int:
+    base = int(config.get("cooldownSec") or 300)
+    if _is_task_ai_provider_outage(summary):
+        return max(base, 3600)
+    return base
+
+
+def _test_network_send_blocked(config: dict[str, Any]) -> bool:
+    if bool(config.get("dryRun")):
+        return False
+    allow = str(os.environ.get("AIDP_ALLOW_TEST_NOTIFICATION_SEND") or "").strip().lower()
+    if allow in {"1", "true", "yes", "on"}:
+        return False
+    if "PYTEST_CURRENT_TEST" not in os.environ:
+        return False
+    return bool(str(config.get("webhookUrl") or "").strip())
+
+
+def _known_error_problem(code: str, fallback: str, detail: str, stage: str, step: str) -> str:
+    if code == "AI_PROVIDER_502":
+        return _provider_problem("做题 AI 上游返回 502/Bad Gateway", detail, stage, step)
+    if code == "AI_PROVIDER_TIMEOUT":
+        return _provider_problem("做题 AI 上游请求超时", detail, stage, step)
+    return fallback
+
+
+def _provider_problem(prefix: str, detail: str, stage: str, step: str) -> str:
+    parts = [prefix]
+    if detail:
+        parts.append(f"详情：{detail[:180]}")
+    stage_step = "/".join(part for part in [stage, step] if part)
+    if stage_step:
+        parts.append(f"发生阶段：{stage_step}")
+    parts.append("当前题拿不到可靠答案")
+    return "；".join(parts) + "。"
 
 
 def _last_sent_at(key: str, refresh_from_disk: bool = False) -> float:
@@ -605,7 +659,9 @@ def _redact(value: str) -> str:
     redacted = AUTH_BEARER_PATTERN.sub(lambda match: f"{match.group('prefix')}<redacted>", value)
     redacted = SECRET_PATTERN.sub(lambda match: f"{match.group('prefix')}<redacted>", redacted)
     redacted = FEISHU_HOOK_PATTERN.sub(lambda match: f"{match.group('prefix')}<redacted>", redacted)
-    return SIGNED_QUERY_PATTERN.sub(lambda match: f"{match.group('prefix')}<redacted>", redacted)
+    redacted = SIGNED_QUERY_PATTERN.sub(lambda match: f"{match.group('prefix')}<redacted>", redacted)
+    redacted = PROVIDER_KEY_PATTERN.sub("<redacted>", redacted)
+    return AWS_ACCESS_KEY_PATTERN.sub("<redacted>", redacted)
 
 
 def _mask_webhook_url(webhook: str) -> str:

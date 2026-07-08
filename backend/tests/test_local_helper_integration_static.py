@@ -199,6 +199,18 @@ def test_local_helper_default_settings_has_single_api_prefix_key() -> None:
     assert default_settings.count("platform_api_prefix") == 1
 
 
+def test_local_helper_reports_errors_to_configured_worker_id() -> None:
+    helper = _helper_source()
+    if not helper.is_file():
+        pytest.skip(f"legacy helper source is not available: {helper}")
+    text = helper.read_text(encoding="utf-8")
+
+    assert "function Get-ConfiguredWorkerId" in text
+    assert "worker_id = Get-ConfiguredWorkerId" in text
+    assert "worker_id = 'aidp-local-helper'" not in text
+    assert "Invoke-AidpWorkerEventReport -Level $Level -Event $Event -Message $Message -Data $Data" in text
+
+
 def test_local_helper_api_prefix_normalization_matches_backend() -> None:
     helper = _helper_source()
     if not helper.is_file():

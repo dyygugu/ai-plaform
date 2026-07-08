@@ -511,7 +511,7 @@ class TaskAutoRunServiceTests(unittest.TestCase):
             self.assertEqual(result.status, "blocked")
             self.assertFalse(result.health_ok)
             self.assertEqual(result.accounts[0].status, "ability_not_enabled")
-            self.assertIn("题型能力库", result.next_step)
+            self.assertIn("AI 标注能力工作台", result.next_step)
         db.close()
 
     def test_research_chart_preflight_reports_no_runnable_accounts_without_starting(self) -> None:

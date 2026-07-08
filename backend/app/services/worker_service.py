@@ -1,4 +1,5 @@
 import json
+from typing import Any, Optional
 from uuid import uuid4
 
 from sqlalchemy import select
@@ -30,6 +31,7 @@ def add_worker_event(
     target_version: str = "",
     severity: str = "info",
     message: str = "",
+    notification_data: Optional[dict[str, Any]] = None,
 ) -> WorkerEvent:
     event = WorkerEvent(
         worker_id=worker_id,
@@ -44,11 +46,20 @@ def add_worker_event(
     db.add(event)
     db.flush()
     if severity in {"error", "critical"}:
+        data = {
+            "worker_id": worker_id,
+            "event_type": event_type.value,
+            "account_user_id": account_user_id,
+            "task_id": task_id,
+            "target_version": target_version,
+        }
+        if notification_data:
+            data.update({key: value for key, value in notification_data.items() if value not in ("", None)})
         send_error_notification(
             event="worker.error",
             level=severity,
             message=message or f"Worker {worker_id} 上报错误",
-            data={"worker_id": worker_id, "event_type": event_type.value, "account_user_id": account_user_id, "task_id": task_id, "target_version": target_version},
+            data=data,
             trace_id=event.trace_id,
         )
     return event
@@ -219,6 +230,7 @@ def report_worker_event(db: Session, payload: WorkerEventReportRequest) -> tuple
         target_version=payload.target_version,
         severity=payload.severity,
         message=message,
+        notification_data=_notification_data_for_payload(payload),
     )
     db.flush()
     return worker, event
@@ -238,6 +250,18 @@ def _serialize_worker_event_message(payload: WorkerEventReportRequest) -> str:
     if not has_structured_fields:
         return payload.message
     return json.dumps({key: value for key, value in structured.items() if value not in ("", None)}, ensure_ascii=False, separators=(",", ":"))
+
+
+def _notification_data_for_payload(payload: WorkerEventReportRequest) -> dict[str, Any]:
+    return {
+        "message": payload.message,
+        "stage": payload.stage,
+        "step": payload.step,
+        "error_code": payload.error_code,
+        "error_detail": payload.error_detail,
+        "retryable": payload.retryable,
+        "duration_ms": payload.duration_ms,
+    }
 
 
 def _human_worker_event_message(payload: WorkerEventReportRequest) -> str:

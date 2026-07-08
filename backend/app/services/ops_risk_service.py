@@ -32,7 +32,7 @@ RISK_EVIDENCE = {
     "backup_missing": "/backups",
     "audit_errors_present": "/security",
     "score_submit_confirmation_pending": "/ai",
-    "score_unknown_type_paused": "/rules",
+    "score_unknown_type_paused": "/ability-workbench",
     "score_review_backlog": "/ai",
 }
 

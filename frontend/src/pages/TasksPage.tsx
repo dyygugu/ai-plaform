@@ -1585,7 +1585,7 @@ export function TasksPage() {
   } else if (detailAbilityDraft) {
     taskWorkbenchNextStep = "能力草稿待审核，请先到 AI 标注能力工作台查看草稿并确认。";
   } else if (!capability) {
-    taskWorkbenchNextStep = "先去题型能力库制作能力；录制能力只作为字段学习来源。";
+    taskWorkbenchNextStep = "先去 AI 标注能力工作台制作能力；录制能力只作为字段学习来源。";
   } else if (draftResult?.ok) {
     taskWorkbenchNextStep = "已有草稿结果，先核对最近结果；需要写入时再进入高级调试确认闸门。";
   } else if (questionContext?.ok) {
@@ -1676,8 +1676,8 @@ export function TasksPage() {
           <Alert
             type={queueExecutableReady(selectedTaskQueue) ? "success" : "warning"}
             showIcon
-            message={queueExecutableReady(selectedTaskQueue) ? "该任务已进入有做题能力" : selectedTaskAbilityDraft ? abilityFlowLabel(selectedTaskAbilityDraft, Boolean(selectedTaskQueue?.catalog_item?.capability_available)).text : "该任务还未进入题型能力流程"}
-            description={queueExecutableReady(selectedTaskQueue) ? "可进入生产控制查看执行材料；正式提交仍需高风险确认。" : selectedTaskAbilityDraft ? "请到题型能力库继续下一步：草稿确认、真实题不提交或审核通过。" : "先去题型能力库制作能力，生成草稿并完成真实题不提交审核。"}
+            message={queueExecutableReady(selectedTaskQueue) ? "该任务已进入有做题能力" : selectedTaskAbilityDraft ? abilityFlowLabel(selectedTaskAbilityDraft, Boolean(selectedTaskQueue?.catalog_item?.capability_available)).text : "该任务还未进入 AI 标注能力工作台流程"}
+            description={queueExecutableReady(selectedTaskQueue) ? "可进入生产控制查看执行材料；正式提交仍需高风险确认。" : selectedTaskAbilityDraft ? "请到 AI 标注能力工作台继续下一步：草稿确认、真实题不提交或审核通过。" : "先去 AI 标注能力工作台制作能力，生成草稿并完成真实题不提交审核。"}
           />
           <Descriptions bordered size="small" column={3}>
             <Descriptions.Item label="选中任务">{selectedTaskQueue?.task_name ?? "-"}</Descriptions.Item>
@@ -1694,7 +1694,7 @@ export function TasksPage() {
             <Button type="primary" disabled={!canOpenTaskOperation(selectedTaskQueue)} onClick={() => void openTaskCapabilityDetail()}>打开任务操作台</Button>
             <Button disabled={!selectedTaskQueue?.accounts.length} onClick={() => selectedTaskQueue?.accounts[0] && openAccountTaskPage(selectedTaskQueue.accounts[0].account)}>打开任务页</Button>
             <Button href="/ai">AI 配置/模型健康</Button>
-            <Button href="/rules">去题型能力库制作</Button>
+            <Button href={`/ability-workbench${selectedTaskQueue?.task_id ? `?task_id=${selectedTaskQueue.task_id}` : ""}`}>去 AI 标注能力工作台制作</Button>
           </Space>
         </Space>
       </Card>
@@ -1920,10 +1920,10 @@ export function TasksPage() {
                       type={autoAbilityReady ? "success" : "warning"}
                       showIcon
                       message={autoAbilityReady ? (isBon8Task ? "该任务已接入 bon8 通用自动做题" : "该任务已发布 AI 做题能力") : "该任务还没有可执行能力"}
-                      description={autoAbilityReady ? (isBon8Task ? "当前复用生产控制执行 bon8 已领取的处理中/返修题；pending-only 账号不在本轮范围内。" : "默认启动当前任务所有可用、当前有题且满足自动循环资格的账号；已有处理中题的账号可直接继续做题，pending-only 账号则仍需平台允许自动领题。") : "先去题型能力库制作能力、验证并发布后，才允许自动做题。"}
+                      description={autoAbilityReady ? (isBon8Task ? "当前复用生产控制执行 bon8 已领取的处理中/返修题；pending-only 账号不在本轮范围内。" : "默认启动当前任务所有可用、当前有题且满足自动循环资格的账号；已有处理中题的账号可直接继续做题，pending-only 账号则仍需平台允许自动领题。") : "先去 AI 标注能力工作台制作能力、验证并发布后，才允许自动做题。"}
                     />
                     {!autoAbilityReady ? (
-                      <Button type="primary" href="/rules">去题型能力库制作</Button>
+                      <Button type="primary" href={`/ability-workbench${detail?.item.task_id ? `?task_id=${detail.item.task_id}` : ""}`}>去 AI 标注能力工作台制作</Button>
                     ) : (
                       <>
                         {autoRunWaitingForItems ? (
@@ -2061,7 +2061,7 @@ export function TasksPage() {
                         type="info"
                         showIcon
                         message="该任务还没有可执行做题能力"
-                        description="当前操作台只展示任务处理流程，不提供生产参数、端到端写入或自动做题入口。请先去题型能力库制作能力。"
+                        description="当前操作台只展示任务处理流程，不提供生产参数、端到端写入或自动做题入口。请先去 AI 标注能力工作台制作能力。"
                       />
                       {operationProcessPlan ? (
                         <>
@@ -2089,10 +2089,10 @@ export function TasksPage() {
                           />
                         </>
                       ) : (
-                        <Alert type="warning" showIcon message="暂未读取到 operation 流程计划" description="请刷新任务数据后重试，或直接进入题型能力库提交规则材料。" />
+                        <Alert type="warning" showIcon message="暂未读取到 operation 流程计划" description="请刷新任务数据后重试，或直接进入 AI 标注能力工作台提交规则材料。" />
                       )}
                       <Space wrap>
-                        <Button type="primary" href={`/rules${detail.item.task_id ? `?task_id=${detail.item.task_id}` : ""}`}>去题型能力库制作</Button>
+                        <Button type="primary" href={`/ability-workbench${detail.item.task_id ? `?task_id=${detail.item.task_id}` : ""}`}>去 AI 标注能力工作台制作</Button>
                         <Button disabled={!selectedTaskQueue?.accounts.length} onClick={() => selectedTaskQueue?.accounts[0] && openAccountTaskPage(selectedTaskQueue.accounts[0].account)}>打开任务页</Button>
                       </Space>
                     </Space>
@@ -2736,7 +2736,7 @@ export function TasksPage() {
                   ) : null}
                 </Space>
               ) : (
-                <Alert type="info" showIcon message="该任务还没有可用能力卡" description="先去题型能力库制作能力；录制学习包只作为字段学习来源，不能替代 Step3/Step4 闸门。" />
+                <Alert type="info" showIcon message="该任务还没有可用能力卡" description="先去 AI 标注能力工作台制作能力；录制学习包只作为字段学习来源，不能替代 Step3/Step4 闸门。" />
               )}
             </Card>
                     </div>

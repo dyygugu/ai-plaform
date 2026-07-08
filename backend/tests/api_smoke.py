@@ -183,17 +183,8 @@ def main() -> None:
             detail = client.get("/api/v1/workers/test-worker")
             assert detail.status_code == 200, detail.text
             assert detail.json()["log_summary"]["total_events"] >= 4
-            rules_center = client.get("/api/v1/rules/center")
-            assert rules_center.status_code == 200, rules_center.text
-            rule_id = rules_center.json()["versions"][0]["id"]
-            diff = client.get(f"/api/v1/rules/versions/{rule_id}/diff")
-            assert diff.status_code == 200, diff.text
-            canary = client.post(f"/api/v1/rules/versions/{rule_id}/canary", json={"canary_percent": 20})
-            assert canary.status_code == 200, canary.text
-            publish = client.post(f"/api/v1/rules/versions/{rule_id}/publish", json={})
-            assert publish.status_code == 200, publish.text
-            rollback = client.post(f"/api/v1/rules/versions/{rule_id}/rollback", json={})
-            assert rollback.status_code == 200, rollback.text
+            old_rules_center = client.get("/api/v1/rules/center")
+            assert old_rules_center.status_code == 404, old_rules_center.text
             assert len(client.get("/api/v1/audit/logs").json()) >= 1
             alert = client.post("/api/v1/alerts/preview", json={})
             assert alert.status_code == 200, alert.text

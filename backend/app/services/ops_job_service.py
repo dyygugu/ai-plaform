@@ -12,7 +12,6 @@ from app.models.audit import AuditLog
 from app.models.backup import BackupJob, BackupStatus
 from app.models.ops import RestoreDrill, RestoreDrillStatus
 from app.models.ops_job import MaintenanceJobRun, MaintenanceJobStatus
-from app.models.rule import RuleVersion, RuleVersionStatus
 from app.models.task import TaskCatalogItem
 from app.models.worker import Worker, WorkerStatus
 from app.schemas.ops_job import DomainSwitchRunbookStep, MaintenanceJobDefinitionRead, MaintenanceJobRunRead, ReleaseGateCheck, SchedulerJobPlan
@@ -164,7 +163,7 @@ def build_release_gate(db: Session) -> tuple[list[ReleaseGateCheck], bool]:
     checks = [
         _check("health", "健康接口", True, "passed", "FastAPI 应用可响应。", {"environment": settings.monitor_env}),
         _task_sample_check(db),
-        _rules_check(db),
+        _ability_workbench_check(),
         _worker_check(db),
         _backup_check(db),
         _restore_check(db),
@@ -193,9 +192,17 @@ def _task_sample_check(db: Session) -> ReleaseGateCheck:
     return _check("task_catalog", "任务目录样本", True, status, f"任务目录当前 {total} 条。", {"count": total})
 
 
-def _rules_check(db: Session) -> ReleaseGateCheck:
-    active = db.scalar(select(RuleVersion).where(RuleVersion.status == RuleVersionStatus.PUBLISHED).order_by(RuleVersion.id.desc()))
-    return _check("rule_version", "规则发布版本", True, "passed" if active else "failed", active.version if active else "未找到 published 规则版本。", {"version": active.version if active else ""})
+def _ability_workbench_check() -> ReleaseGateCheck:
+    try:
+        from app.services.task_ability_service import list_task_ability_drafts
+
+        drafts = list_task_ability_drafts().items
+    except Exception as exc:
+        return _check("task_ability_workbench", "AI 标注能力工作台", True, "failed", f"能力工作台读取失败：{exc}", {"enabled": 0, "total": 0})
+    enabled = [item for item in drafts if item.capability_enabled and item.flow_stage == "capability_enabled"]
+    status = "passed" if enabled else "failed"
+    message = f"已启用能力 {len(enabled)} 个，草稿 {len(drafts)} 个。" if enabled else "未找到已启用的 AI 标注能力。"
+    return _check("task_ability_workbench", "AI 标注能力工作台", True, status, message, {"enabled": len(enabled), "total": len(drafts)})
 
 
 def _worker_check(db: Session) -> ReleaseGateCheck:
@@ -268,7 +275,7 @@ def build_domain_switch_runbook(db: Session) -> tuple[list[ReleaseGateCheck], bo
             order=1,
             title="确认本地验收入口",
             command_or_action=f"打开 {target_base_url} 并按 acceptance-checklist 完成人工验收。",
-            expected_result="首页、任务看板、规则中心、Worker、运维中枢均可见。",
+            expected_result="首页、任务看板、AI 标注能力工作台、Worker、运维中枢均可见。",
             rollback_note="若不通过，不修改正式反代。",
         ),
         DomainSwitchRunbookStep(
