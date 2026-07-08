@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
-from app.db.session import get_db
+from app.db.session import SessionLocal, get_db
 from app.schemas.learning_package import SelectLearningPackageRequest
 from app.schemas.task_auto_runs import TaskAutoRunPreflightResponse, TaskAutoRunResponse, TaskAutoRunStartRequest
 from app.schemas.task_ability import TaskAbilityDraftCreateRequest, TaskAbilityDraftListResponse, TaskAbilityDraftRead
@@ -334,7 +334,15 @@ def start_task_trial_run(task_id: str, payload: TaskAbilityRunRequest, request: 
         run_config = {**run_config, "ability_run_mode": "trial"}
         run_request = TaskAutoRunStartRequest(task_id=str(task_id), node_id=payload.node_id, account_user_ids=payload.account_user_ids, run_config=run_config)
         run = start_task_auto_run(db, run_request, adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()), state_dir=getattr(request.app.state, "task_auto_run_state_dir", None))
-        ticked = tick_task_auto_run(_run_id(run), adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()), state_dir=getattr(request.app.state, "task_auto_run_state_dir", None))
+        ticked = tick_task_auto_run(
+            _run_id(run),
+            adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()),
+            state_dir=getattr(request.app.state, "task_auto_run_state_dir", None),
+            db=db,
+        )
+        db.commit()
+        if _run_status(ticked) == "blocked":
+            raise ValueError(_run_last_error(ticked) or "试运行首轮被执行器阻断。")
         record_task_ability_run(task_id, "trial", ticked)
         return ticked
     except ValueError as exc:
@@ -372,10 +380,9 @@ async def _start_step4_production_worker(request: Request, run_id: str, run_conf
     registry = _generic_worker_registry(request)
     worker = registry.ensure(
         run_id,
-        tick_func=lambda: tick_task_auto_run(
+        tick_func=lambda: _tick_task_auto_run_with_db(
+            request,
             run_id,
-            adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()),
-            state_dir=getattr(request.app.state, "task_auto_run_state_dir", None),
         ),
         interval_seconds=_worker_interval_seconds(run_config),
     )
@@ -389,8 +396,28 @@ async def _start_step4_production_worker(request: Request, run_id: str, run_conf
     )
     if _run_status(latest) == "blocked":
         raise ValueError(_run_last_error(latest) or "生产运行首轮被执行器阻断。")
+    if _run_status(latest) in {"stopped", "completed", "completed_no_item", "failed", "executor_pending"}:
+        return latest
     worker.start()
     return latest
+
+
+def _tick_task_auto_run_with_db(request: Request, run_id: str) -> TaskAutoRunResponse:
+    db = SessionLocal()
+    try:
+        result = tick_task_auto_run(
+            run_id,
+            adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()),
+            state_dir=getattr(request.app.state, "task_auto_run_state_dir", None),
+            db=db,
+        )
+        db.commit()
+        return result
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
 
 
 def _generic_worker_registry(request: Request) -> GenericTaskAutoRunWorkerRegistry:

@@ -1,5 +1,6 @@
 import json
 import os
+import inspect
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -26,6 +27,14 @@ from app.services.bon8_production_service import (
     get_bon8_production_run,
     start_bon8_production,
     stop_bon8_production_run,
+)
+from app.services.aidp_3d_http_answer_service import (
+    AIDP_3D_RUBRIC_MAX_PARALLEL_ACCOUNTS,
+    AIDP_3D_RUBRIC_NODE_ID,
+    AIDP_3D_RUBRIC_TASK_ID,
+    AIDP_3D_RUBRIC_TEMPLATE_ID,
+    Aidp3DAnswerError,
+    Aidp3DHttpAnswerService,
 )
 from app.services.runtime_account_service import load_production_state, load_runtime_account
 from app.services.task_ability_service import (
@@ -929,84 +938,61 @@ class TaskAutoRunResearchChartAdapter:
         return snapshot
 
 
-class TaskAutoRun3dRubricAdapter:
+class TaskAutoRun3DRubricAdapter:
     adapter_key = "3d_rubric"
-    supported_task_ids: set[str] = set()
+    supported_task_ids = {AIDP_3D_RUBRIC_TASK_ID}
 
     def __init__(
         self,
         *,
-        ability_store_path: Optional[Path] = None,
         state_dir: Optional[Path] = None,
+        evidence_root: Optional[Path] = None,
         account_loader=load_runtime_account,
+        answer_service: Optional[Aidp3DHttpAnswerService] = None,
+        max_parallel_accounts: int = AIDP_3D_RUBRIC_MAX_PARALLEL_ACCOUNTS,
     ) -> None:
-        self.ability_store_path = ability_store_path
         self.state_dir = state_dir
+        self.evidence_root = evidence_root
         self.account_loader = account_loader
-
-    def supports_task(self, task_id: str) -> bool:
-        draft = self._draft(str(task_id))
-        return bool(draft) and str(draft.get("task_type") or "") == "3d_rubric_eval"
+        self.answer_service = answer_service or Aidp3DHttpAnswerService()
+        self.max_parallel_accounts = max(1, int(max_parallel_accounts or AIDP_3D_RUBRIC_MAX_PARALLEL_ACCOUNTS))
+        self._formal_submit_lock = threading.Lock()
 
     def start(self, _db: Session, request: TaskAutoRunStartRequest) -> TaskAutoRunAdapterSnapshot:
-        draft = self._enabled_draft(str(request.task_id))
-        writer_block_reason = self._remote_writer_block_reason(draft)
-        if not draft or writer_block_reason:
-            last_error = "3D 能力未发布，不能启动自动做题。" if not draft else writer_block_reason
-            next_step = "先完成真实题不提交审核并验证暂存字段映射。" if not draft else "等待 3D SubmitTempItemAnswer 字段映射与远端暂存写入器完成验收。"
-            accounts = [
+        account_ids = _normalize_account_ids(request.account_user_ids)
+        accounts = []
+        for account_id in account_ids:
+            runtime = self._load_account_context(account_id)
+            accounts.append(
                 TaskAutoRunAccountState(
                     account_user_id=account_id,
-                    status="ability_not_enabled" if not draft else "remote_writer_not_ready",
-                    current_stage="3D 能力未发布" if not draft else "3D 暂存写入器未就绪",
-                    healthy=False,
-                    last_error="3D 能力尚未完成真实题不提交审核并发布。" if not draft else writer_block_reason,
+                    account_name=str(runtime.get("name") or runtime.get("displayName") or runtime.get("customName") or account_id),
+                    status="running_auto" if runtime.get("cookie") else "isolated_failed",
+                    current_stage="等待 3D HTTP 自动做题 tick" if runtime.get("cookie") else "账号 Cookie 不可用",
+                    healthy=bool(runtime.get("cookie")),
+                    last_error="" if runtime.get("cookie") else "账号 Cookie 不可用，不能执行 3D HTTP 自动做题。",
                 )
-                for account_id in _normalize_account_ids(request.account_user_ids)
-            ]
-            snapshot = TaskAutoRunAdapterSnapshot(
-                adapter_key=self.adapter_key,
-                adapter_run_id=f"3d-rubric-blocked-{uuid4().hex[:12]}",
-                task_id=str(request.task_id),
-                node_id=str(request.node_id or "1"),
-                status="blocked",
-                stop_requested=False,
-                accounts=accounts,
-                last_error=last_error,
-                next_step=next_step,
-                message="3D 自动做题被能力发布闸门阻止。" if not draft else "3D 自动做题被暂存写入器闸门阻止。",
-                raw_adapter_run={"adapter": self.adapter_key, "executor_status": "ability_not_enabled" if not draft else "remote_writer_not_ready"},
             )
-            self._write_snapshot(snapshot)
-            return snapshot
-        accounts = [
-            TaskAutoRunAccountState(
-                account_user_id=account_id,
-                account_name=str((self.account_loader(account_id) or {}).get("name") or account_id),
-                status="running_auto",
-                current_stage="等待 3D rubric 自动做题 tick",
-                healthy=True,
-            )
-            for account_id in _normalize_account_ids(request.account_user_ids)
-        ]
         snapshot = TaskAutoRunAdapterSnapshot(
             adapter_key=self.adapter_key,
             adapter_run_id=f"3d-rubric-{uuid4().hex[:12]}",
-            task_id=str(request.task_id),
-            node_id=str(request.node_id or "1"),
+            task_id=str(request.task_id or AIDP_3D_RUBRIC_TASK_ID),
+            node_id=str(request.node_id or AIDP_3D_RUBRIC_NODE_ID),
             status="running_auto",
             stop_requested=False,
             accounts=accounts,
             last_error="",
-            next_step="当前 3D adapter 只接入工作台运行门禁；真实提交前仍需完成暂存字段映射验证。",
-            message="3D rubric 自动做题 run 已创建，等待后续 tick 执行真实题不提交链路。",
+            next_step="后台循环将按账号并行、账号内串行执行 3D HTTP 提交；停止按钮会阻止下一轮 tick。",
+            message="3D Rubric HTTP 自动做题 run 已启动，等待后台 tick 执行。",
             raw_adapter_run={
                 "adapter": self.adapter_key,
                 "executor_status": "ready",
-                "draft_id": str(draft.get("id") or ""),
-                "ability_version": str(draft.get("version") or ""),
+                "ability_source": "ai_annotation_workbench_3d",
+                "template_id": AIDP_3D_RUBRIC_TEMPLATE_ID,
                 "submits_remote": False,
                 "run_config": request.run_config,
+                "account_evidence": {},
+                "submit_counts": {},
             },
         )
         self._write_snapshot(snapshot)
@@ -1014,87 +1000,88 @@ class TaskAutoRun3dRubricAdapter:
 
     def preflight(self, request: TaskAutoRunStartRequest) -> TaskAutoRunPreflightResponse:
         account_ids = _normalize_account_ids(request.account_user_ids)
-        draft = self._enabled_draft(str(request.task_id))
         checks: list[TaskAutoRunPreflightCheck] = [
             TaskAutoRunPreflightCheck(
-                key="ability_published",
-                title="3D 能力发布",
-                status="passed" if draft else "blocked",
-                detail="3D 能力已发布，可进入试运行。" if draft else "3D 能力未发布或真实题不提交审核未通过。",
-                next_step="" if draft else "先完成真实题不提交审核、暂存字段验证，再发布能力。",
-            ),
-            TaskAutoRunPreflightCheck(
-                key="remote_writer",
-                title="3D 暂存字段写入器",
-                status="passed" if draft and not self._remote_writer_block_reason(draft) else "blocked",
-                detail="3D SubmitTempItemAnswer 字段映射和写入器已就绪。" if draft and not self._remote_writer_block_reason(draft) else "3D 暂存字段映射或远端写入器尚未验收，不能启动自动做题。",
-                next_step="" if draft and not self._remote_writer_block_reason(draft) else "等待 3D SubmitTempItemAnswer 暂存字段映射与远端写入器完成验收。",
-            ),
-            TaskAutoRunPreflightCheck(
-                key="selected_accounts",
-                title="执行账号",
-                status="passed" if account_ids else "blocked",
-                detail=f"已选择 {len(account_ids)} 个账号。" if account_ids else "当前未选择任何账号。",
-                next_step="" if account_ids else "先选择至少一个有该任务权限的账号。",
-            ),
+                key="adapter_ready",
+                title="3D 执行器",
+                status="passed",
+                detail="3D Rubric 已接入 AI 标注能力工作台后的平台 HTTP 执行器，不依赖旧题型能力库。",
+            )
         ]
-        cookie_ok = sum(1 for account_id in account_ids if (self.account_loader(account_id) or {}).get("cookie"))
+        if not account_ids:
+            checks.append(
+                TaskAutoRunPreflightCheck(
+                    key="selected_accounts",
+                    title="执行账号",
+                    status="blocked",
+                    detail="当前未选择任何账号。",
+                    next_step="先选择有 3D 任务权限且 Cookie 正常的账号。",
+                )
+            )
+        else:
+            checks.append(
+                TaskAutoRunPreflightCheck(
+                    key="selected_accounts",
+                    title="执行账号",
+                    status="passed",
+                    detail=f"已选择 {len(account_ids)} 个账号。",
+                )
+            )
+        cookie_ok = 0
+        for account_id in account_ids:
+            if self._load_account_context(account_id).get("cookie"):
+                cookie_ok += 1
         checks.append(
             TaskAutoRunPreflightCheck(
                 key="account_cookie",
                 title="账号 Cookie",
                 status="passed" if account_ids and cookie_ok == len(account_ids) else "blocked",
                 detail=f"可用 Cookie 账号 {cookie_ok}/{len(account_ids)}。",
-                next_step="" if account_ids and cookie_ok == len(account_ids) else "先同步或重登缺 Cookie 的账号。",
+                next_step="" if account_ids and cookie_ok == len(account_ids) else "先同步或重新登录缺 Cookie 的账号。",
+            )
+        )
+        evidence_status = "passed"
+        evidence_detail = ""
+        try:
+            _evidence_root(self.evidence_root).mkdir(parents=True, exist_ok=True)
+            self._state_root().mkdir(parents=True, exist_ok=True)
+            evidence_detail = f"证据目录可用：{_evidence_root(self.evidence_root)}"
+        except Exception as exc:  # noqa: BLE001
+            evidence_status = "blocked"
+            evidence_detail = f"证据或状态目录不可写：{exc}"
+        checks.append(
+            TaskAutoRunPreflightCheck(
+                key="evidence_storage",
+                title="状态与证据目录",
+                status=evidence_status,
+                detail=evidence_detail,
+                next_step="" if evidence_status == "passed" else "修复数据目录权限后再启动。",
             )
         )
         blocked = [item for item in checks if item.required and item.status != "passed"]
         can_start = not blocked
-        next_step = "可以进入试运行，正式提交仍受运行门禁保护。" if can_start else (blocked[0].next_step or "先完成真实题不提交审核和账号准备。")
         return TaskAutoRunPreflightResponse(
             generated_at=utc_now(),
-            task_id=str(request.task_id),
-            node_id=str(request.node_id or "1"),
+            task_id=str(request.task_id or AIDP_3D_RUBRIC_TASK_ID),
+            node_id=str(request.node_id or AIDP_3D_RUBRIC_NODE_ID),
             adapter_key=self.adapter_key,
             status="ready" if can_start else "blocked",
             can_start=can_start,
             runnable_account_count=len(account_ids) if can_start else 0,
             checks=checks,
-            message="3D 自检通过；该检查不会提交、暂存或领取题目。" if can_start else "3D 自检发现阻塞项，未启动自动做题。",
-            next_step=next_step,
+            message="3D 自检通过；自检不提交、不暂存。" if can_start else "3D 自检发现阻塞项，未启动自动做题。",
+            next_step="可以启动 3D HTTP 自动做题；建议先观察首轮证据。" if can_start else "先处理阻塞项。",
         )
 
     def get(self, adapter_run_id: str) -> TaskAutoRunAdapterSnapshot:
         return self._read_snapshot(adapter_run_id)
 
-    def tick(self, adapter_run_id: str) -> TaskAutoRunAdapterSnapshot:
-        snapshot = self.get(adapter_run_id)
-        draft = self._enabled_draft(snapshot.task_id)
-        block_reason = self._remote_writer_block_reason(draft)
-        if block_reason:
-            snapshot.status = "blocked"
-            snapshot.last_error = block_reason
-            snapshot.message = "3D 自动做题 tick 已阻止：暂存写入器未就绪。"
-            snapshot.next_step = "先完成 3D SubmitTempItemAnswer 字段映射与远端暂存写入器验收，再允许试运行或生产运行。"
-            snapshot.accounts = [
-                _copy_model(account, update={"status": "remote_writer_not_ready", "current_stage": "3D 暂存写入器未就绪", "healthy": False, "last_error": block_reason})
-                for account in snapshot.accounts
-            ]
-            self._write_snapshot(snapshot)
-            return snapshot
-        snapshot.status = "blocked"
-        snapshot.last_error = "3D 自动做题 tick 尚未实现。"
-        snapshot.message = "3D 自动做题 tick 尚未实现，已阻止运行。"
-        snapshot.next_step = "补齐 3D 暂存 payload writer 和提交门禁后再启用。"
-        self._write_snapshot(snapshot)
-        return snapshot
-
     def stop(self, adapter_run_id: str) -> TaskAutoRunAdapterSnapshot:
         snapshot = self.get(adapter_run_id)
         snapshot.status = "stopped"
         snapshot.stop_requested = True
-        snapshot.message = "3D rubric 自动做题 run 已停止。"
-        snapshot.next_step = "如需继续，重新从工作台启动试运行。"
+        snapshot.message = "3D HTTP 自动做题 run 已停止。"
+        snapshot.next_step = "如需继续，刷新任务后重新启动。"
         snapshot.accounts = [
             _copy_model(account, update={"status": "stopped", "current_stage": "已停止", "healthy": True})
             for account in snapshot.accounts
@@ -1102,34 +1089,417 @@ class TaskAutoRun3dRubricAdapter:
         self._write_snapshot(snapshot)
         return snapshot
 
-    def _draft(self, task_id: str) -> dict[str, Any]:
-        path = self.ability_store_path or _default_ability_store_path()
-        data = _load_json_file(path)
-        items = data.get("items", []) if isinstance(data, dict) else data if isinstance(data, list) else []
-        return next((item for item in items if isinstance(item, dict) and str(item.get("task_id") or "") == str(task_id)), {})
+    def tick(self, adapter_run_id: str, db: Optional[Session] = None) -> TaskAutoRunAdapterSnapshot:
+        snapshot = self.get(adapter_run_id)
+        if snapshot.stop_requested or snapshot.status == "stopped":
+            return snapshot
+        account_evidence = snapshot.raw_adapter_run.get("account_evidence") if isinstance(snapshot.raw_adapter_run.get("account_evidence"), dict) else {}
+        runnable_accounts = [
+            account
+            for account in snapshot.accounts
+            if account.status not in {"stopped", "isolated_failed", "ability_not_enabled"}
+        ]
+        results_by_account: dict[str, dict[str, Any]] = {}
+        if runnable_accounts:
+            with ThreadPoolExecutor(max_workers=min(self.max_parallel_accounts, len(runnable_accounts))) as executor:
+                future_map = {
+                    executor.submit(self._run_account_tick, snapshot, account): account.account_user_id
+                    for account in runnable_accounts
+                }
+                for future in as_completed(future_map):
+                    account_user_id = future_map[future]
+                    try:
+                        results_by_account[account_user_id] = future.result()
+                    except Exception as exc:  # noqa: BLE001 - isolate one account, keep the batch running.
+                        results_by_account[account_user_id] = {"error": exc}
 
-    def _enabled_draft(self, task_id: str) -> dict[str, Any]:
-        draft = self._draft(task_id)
-        if not draft or str(draft.get("task_type") or "") != "3d_rubric_eval":
-            return {}
-        review = draft.get("real_no_submit_review") if isinstance(draft.get("real_no_submit_review"), dict) else {}
-        if bool(draft.get("capability_enabled")) and str(draft.get("flow_stage") or "") == "capability_enabled" and review.get("review_status") == "人工已通过":
-            return draft
-        return {}
+        next_accounts: list[TaskAutoRunAccountState] = []
+        any_success = False
+        any_formal_submit = False
+        any_waiting = False
+        any_limit_reached = False
+        any_rate_limited = False
+        for account in snapshot.accounts:
+            if account.status in {"stopped", "isolated_failed", "ability_not_enabled"}:
+                next_accounts.append(account)
+                continue
+            result = results_by_account.get(account.account_user_id) or {}
+            exc = result.get("error")
+            if exc is not None:
+                error_code = exc.code if isinstance(exc, Aidp3DAnswerError) else "WORKER_EXCEPTION"
+                error_detail = str(exc)
+                evidence = getattr(exc, "evidence", None) if isinstance(exc, Aidp3DAnswerError) else None
+                evidence = dict(evidence) if isinstance(evidence, dict) else {}
+                evidence.update(
+                    {
+                        "attempted": bool(evidence.get("attempted")),
+                        "success": False,
+                        "readback_ok": bool(evidence.get("readback_ok")),
+                        "error_code": error_code,
+                        "error": error_detail,
+                        "message": error_detail,
+                    }
+                )
+                account_evidence[account.account_user_id] = evidence
+                self._record_account_evidence(snapshot, account, evidence)
+                self._record_worker_event(
+                    db,
+                    account,
+                    severity="warning",
+                    code=error_code,
+                    message=f"3D 自动做题账号失败：{error_code}",
+                    detail=error_detail,
+                    stage=getattr(exc, "stage", "worker_runtime") or "worker_runtime",
+                    step=str(evidence.get("worker_step") or ""),
+                )
+                next_accounts.append(
+                    _copy_model(
+                        account,
+                        update={
+                            "status": "isolated_failed",
+                            "current_stage": "3D HTTP tick 失败",
+                            "healthy": False,
+                            "last_error": error_detail,
+                        },
+                    )
+                )
+                continue
+            evidence = result.get("evidence") if isinstance(result.get("evidence"), dict) else {}
+            account_evidence[account.account_user_id] = evidence
+            self._record_account_evidence(snapshot, account, evidence)
+            if evidence.get("no_current_item"):
+                any_waiting = True
+                next_accounts.append(
+                    _copy_model(
+                        account,
+                        update={
+                            "status": "waiting_items",
+                            "current_stage": "当前无 3D 题，等待下一轮",
+                            "healthy": True,
+                            "last_error": "",
+                        },
+                    )
+                )
+                continue
+            if evidence.get("limit_reached"):
+                any_limit_reached = True
+                next_accounts.append(
+                    _copy_model(
+                        account,
+                        update={
+                            "status": "completed",
+                            "current_item_id": str(evidence.get("item_id") or account.current_item_id),
+                            "current_stage": "已达到本次运行提交上限",
+                            "healthy": True,
+                            "last_error": "",
+                        },
+                    )
+                )
+                continue
+            if evidence.get("rate_limited"):
+                any_rate_limited = True
+                next_accounts.append(
+                    _copy_model(
+                        account,
+                        update={
+                            "status": "waiting_rate_limit",
+                            "current_item_id": str(evidence.get("item_id") or account.current_item_id),
+                            "current_stage": "提交速率限制等待中",
+                            "healthy": True,
+                            "last_error": "",
+                        },
+                    )
+                )
+                continue
+            if evidence.get("success"):
+                any_success = True
+                any_formal_submit = any_formal_submit or bool(evidence.get("submits_remote"))
+                next_accounts.append(
+                    _copy_model(
+                        account,
+                        update={
+                            "status": "submitted" if evidence.get("submits_remote") else "temp_saved_waiting_submit",
+                            "current_item_id": str(evidence.get("next_item_id") or evidence.get("item_id") or ""),
+                            "current_stage": "3D HTTP 提交并回读成功" if evidence.get("submits_remote") else "3D HTTP 试运行暂存成功",
+                            "healthy": True,
+                            "last_error": "",
+                        },
+                    )
+                )
+                continue
+            error_message = str(evidence.get("error") or evidence.get("message") or "3D HTTP tick 未成功。")
+            self._record_worker_event(
+                db,
+                account,
+                severity="warning",
+                code=str(evidence.get("error_code") or "UNKNOWN_ERROR"),
+                message=f"3D 自动做题账号失败：{evidence.get('error_code') or 'UNKNOWN_ERROR'}",
+                detail=error_message,
+                stage="submit_readback",
+                step="submit_answer",
+            )
+            next_accounts.append(
+                _copy_model(
+                    account,
+                    update={
+                        "status": "isolated_failed",
+                        "current_item_id": str(evidence.get("item_id") or account.current_item_id),
+                        "current_stage": "3D HTTP tick 失败",
+                        "healthy": False,
+                        "last_error": error_message,
+                    },
+                )
+            )
 
-    def _remote_writer_block_reason(self, draft: dict[str, Any]) -> str:
-        if not draft:
-            return ""
-        field_mapping = draft.get("field_mapping") if isinstance(draft.get("field_mapping"), dict) else {}
-        if not field_mapping.get("verified_submit_temp_payload"):
-            return "3D 暂存字段映射尚未验证，不能启动自动做题。"
-        return "3D 暂存字段映射虽然已标记验证，但当前版本尚未实现远端暂存写入器。"
+        snapshot.accounts = next_accounts
+        failed_count = sum(1 for account in next_accounts if not account.healthy)
+        if next_accounts and failed_count == len(next_accounts):
+            snapshot.status = "blocked"
+            snapshot.last_error = "3D 所有账号本轮 tick 均失败。"
+            snapshot.message = "3D HTTP 自动做题 tick 未成功。"
+            snapshot.next_step = "检查账号 Cookie、当前题、qwen3-vl-plus、SubmitTempItemAnswer/SubmitItemAndReceive 回读证据。"
+            self._record_worker_event(
+                db,
+                None,
+                severity="error",
+                code="WORKER_EXCEPTION",
+                message="3D 自动做题整轮失败：所有账号均异常",
+                detail=snapshot.last_error,
+                stage="worker_runtime",
+                step="log_summary",
+            )
+        else:
+            run_mode = _ability_run_mode(snapshot)
+            if run_mode == "trial":
+                trial_completed = bool(next_accounts) and all(account.status == "temp_saved_waiting_submit" and account.healthy for account in next_accounts)
+                snapshot.status = "completed" if trial_completed else "completed_no_item" if any_waiting else "blocked"
+                snapshot.message = "3D 试运行已完成所有账号真实题暂存，未正式提交。" if trial_completed else "3D 试运行存在账号无当前题，未形成生产放行记录。" if any_waiting else "3D 试运行未成功。"
+                snapshot.next_step = "请检查试运行证据后，再人工决定是否进入生产运行。" if trial_completed else "等待所有选中账号出现当前题后重新试运行。"
+            elif next_accounts and all(account.status == "completed" for account in next_accounts):
+                snapshot.status = "completed"
+                snapshot.message = "3D 生产运行已达到本次账号提交上限。"
+                snapshot.next_step = "如需继续，提高提交上限后重新启动生产运行。"
+            else:
+                snapshot.status = "running_auto"
+                snapshot.message = (
+                    "3D tick 已完成真实提交和回读。"
+                    if any_formal_submit
+                    else "3D tick 已达到提交上限，继续等待其他账号。"
+                    if any_limit_reached
+                    else "3D tick 受速率限制，等待下一轮。"
+                    if any_rate_limited
+                    else "3D tick 未提交新题，继续等待。"
+                    if any_waiting
+                    else "3D tick 已完成。"
+                )
+                snapshot.next_step = "后台循环会继续执行下一轮；需要停止时点击立即停止。"
+            snapshot.last_error = ""
+        snapshot.raw_adapter_run = {
+            **snapshot.raw_adapter_run,
+            "last_tick_at": utc_now().isoformat(),
+            "submits_remote": any_formal_submit or any(bool(item.get("submits_remote")) for item in account_evidence.values() if isinstance(item, dict)),
+            "account_evidence": account_evidence,
+        }
+        self._write_snapshot(snapshot)
+        return snapshot
+
+    def _run_account_tick(self, snapshot: TaskAutoRunAdapterSnapshot, account_state: TaskAutoRunAccountState) -> dict[str, Any]:
+        account = self._load_account_context(account_state.account_user_id)
+        if not account.get("cookie"):
+            raise Aidp3DAnswerError("TASK_PAGE_AUTH_EXPIRED", "账号 Cookie 不可用。", stage="prepare_context", retryable=True)
+        submit_remote = _ability_run_mode(snapshot) == "production"
+        if submit_remote:
+            with self._formal_submit_lock:
+                guard = self._formal_submit_guard(snapshot, account_state)
+                if guard is not None:
+                    return {"evidence": guard}
+                evidence = self.answer_service.submit_one(
+                    account=account,
+                    account_user_id=account_state.account_user_id,
+                    task_id=snapshot.task_id,
+                    node_id=snapshot.node_id,
+                    run_id=snapshot.adapter_run_id,
+                    submit_remote=True,
+                )
+                if evidence.get("success") and evidence.get("submits_remote"):
+                    self._record_formal_submit_success(snapshot, account_state.account_user_id, str(evidence.get("submitted_at") or utc_now().isoformat()))
+        else:
+            evidence = self.answer_service.submit_one(
+                account=account,
+                account_user_id=account_state.account_user_id,
+                task_id=snapshot.task_id,
+                node_id=snapshot.node_id,
+                run_id=snapshot.adapter_run_id,
+                submit_remote=False,
+            )
+        return {"evidence": evidence}
+
+    def _formal_submit_guard(self, snapshot: TaskAutoRunAdapterSnapshot, account_state: TaskAutoRunAccountState) -> Optional[dict[str, Any]]:
+        gate = get_task_ability_run_gate(snapshot.task_id)
+        if not gate.get("can_start_production"):
+            return {
+                "attempted": True,
+                "success": False,
+                "submits_remote": False,
+                "item_id": account_state.current_item_id,
+                "error_code": "UNKNOWN_ERROR",
+                "error": str(gate.get("next_step") or "当前 Step4 生产门禁未放行，已阻止正式提交。"),
+            }
+        limit = _submit_limit_for_run(snapshot)
+        if limit is not None:
+            counts = snapshot.raw_adapter_run.get("submit_counts") if isinstance(snapshot.raw_adapter_run.get("submit_counts"), dict) else {}
+            submitted = _num(counts.get(account_state.account_user_id))
+            if submitted >= limit:
+                return {
+                    "attempted": False,
+                    "success": False,
+                    "submits_remote": False,
+                    "item_id": account_state.current_item_id,
+                    "limit_reached": True,
+                    "message": f"账号已达到本次运行提交上限 {limit}，未继续正式提交。",
+                }
+        wait_seconds = _rate_limit_wait_seconds(snapshot)
+        if wait_seconds > 0:
+            return {
+                "attempted": False,
+                "success": False,
+                "submits_remote": False,
+                "item_id": account_state.current_item_id,
+                "rate_limited": True,
+                "message": f"提交速率限制中，约 {wait_seconds} 秒后再尝试。",
+            }
+        return None
+
+    def _record_formal_submit_success(self, snapshot: TaskAutoRunAdapterSnapshot, account_user_id: str, submitted_at: str) -> None:
+        counts = snapshot.raw_adapter_run.get("submit_counts") if isinstance(snapshot.raw_adapter_run.get("submit_counts"), dict) else {}
+        next_counts = dict(counts)
+        next_counts[account_user_id] = _num(next_counts.get(account_user_id)) + 1
+        snapshot.raw_adapter_run["submit_counts"] = next_counts
+        snapshot.raw_adapter_run["last_formal_submit_at"] = submitted_at
+        snapshot.raw_adapter_run["last_formal_submit_epoch"] = utc_now().timestamp()
+
+    def _record_account_evidence(self, snapshot: TaskAutoRunAdapterSnapshot, account_state: TaskAutoRunAccountState, evidence: dict[str, Any]) -> None:
+        if not evidence:
+            return
+        now = utc_now()
+        day = now.date().isoformat()
+        status = "submitted" if evidence.get("success") and evidence.get("submits_remote") else "temp_saved" if evidence.get("success") else "waiting" if evidence.get("no_current_item") or evidence.get("rate_limited") or evidence.get("limit_reached") else "failed"
+        root = _evidence_root(self.evidence_root)
+        detail = {
+            "schema_version": 1,
+            "retention_days": 7,
+            "created_at": now.isoformat(),
+            "run_id": snapshot.adapter_run_id,
+            "adapter_key": self.adapter_key,
+            "task_id": snapshot.task_id,
+            "node_id": snapshot.node_id,
+            "account_user_id": account_state.account_user_id,
+            "account_name": account_state.account_name,
+            "item_id": str(evidence.get("item_id") or ""),
+            "status": status,
+            "writes_remote": bool(evidence.get("attempted")),
+            "submits_remote": bool(evidence.get("submits_remote")),
+            "saved_to_task_ui": bool(evidence.get("saved_to_task_ui") or evidence.get("success")),
+            "source_mode": "3d_http_submit_item_and_receive" if evidence.get("submits_remote") else "3d_http_temp_save_only" if evidence.get("temp_save_only") else "3d_http_guard",
+            "evidence": evidence,
+        }
+        detail_dir = root / "details" / day
+        detail_dir.mkdir(parents=True, exist_ok=True)
+        item_id = str(evidence.get("item_id") or "no-current-item")
+        detail_path = detail_dir / f"{_safe_file_part(snapshot.adapter_run_id)}-{_safe_file_part(account_state.account_user_id)}-{_safe_file_part(item_id)}.json"
+        _write_json_file(detail_path, detail)
+        aggregate_path = root / "aggregates" / "daily" / f"{day}.json"
+        aggregate = _load_json_file(aggregate_path)
+        if not isinstance(aggregate, dict) or not isinstance(aggregate.get("items"), dict):
+            aggregate = {"schema_version": 1, "date": day, "items": {}}
+        key = f"{snapshot.task_id}:{account_state.account_user_id}"
+        item = aggregate["items"].get(key) if isinstance(aggregate["items"].get(key), dict) else {}
+        item = {
+            "date": day,
+            "task_id": snapshot.task_id,
+            "account_user_id": account_state.account_user_id,
+            "account_name": account_state.account_name,
+            "total": int(item.get("total") or 0) + 1,
+            "submitted": int(item.get("submitted") or 0) + (1 if status == "submitted" else 0),
+            "failed": int(item.get("failed") or 0) + (1 if status == "failed" else 0),
+            "waiting": int(item.get("waiting") or 0) + (1 if status == "waiting" else 0),
+            "temp_saved": int(item.get("temp_saved") or 0) + (1 if status == "temp_saved" else 0),
+            "last_item_id": item_id,
+            "last_status": status,
+            "last_updated_at": now.isoformat(),
+        }
+        aggregate["items"][key] = item
+        aggregate_path.parent.mkdir(parents=True, exist_ok=True)
+        _write_json_file(aggregate_path, aggregate)
+
+    def _record_worker_event(
+        self,
+        db: Optional[Session],
+        account_state: Optional[TaskAutoRunAccountState],
+        *,
+        severity: str,
+        code: str,
+        message: str,
+        detail: str,
+        stage: str,
+        step: str,
+    ) -> None:
+        if db is None:
+            return
+        try:
+            from app.models.worker import WorkerEventType, WorkerStatus
+            from app.schemas.worker import WorkerEventReportRequest
+            from app.services.worker_service import add_worker_event, ensure_worker
+
+            stage, step = _normalize_3d_worker_event_stage_step(stage, step)
+            worker = ensure_worker(db, "platform-worker")
+            worker.display_name = "平台本机执行器"
+            worker.status = WorkerStatus.DEGRADED if severity in {"error", "critical"} else WorkerStatus.ONLINE
+            worker.current_task_id = AIDP_3D_RUBRIC_TASK_ID
+            if account_state is not None:
+                worker.current_account_user_id = account_state.account_user_id
+            payload = WorkerEventReportRequest(
+                worker_id="platform-worker",
+                account_user_id=account_state.account_user_id if account_state is not None else "",
+                task_id=AIDP_3D_RUBRIC_TASK_ID,
+                severity=severity,
+                message=message,
+                stage=stage,
+                step=step,
+                error_code=code,
+                error_detail=detail,
+                retryable=severity != "error",
+            ).model_dump(mode="json")
+            add_worker_event(
+                db,
+                "platform-worker",
+                WorkerEventType.EVENT_REPORT,
+                account_user_id=account_state.account_user_id if account_state is not None else "",
+                task_id=AIDP_3D_RUBRIC_TASK_ID,
+                severity=severity,
+                message=json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+            )
+        except Exception:
+            return
+
+    def _load_account_context(self, account_user_id: str) -> dict[str, Any]:
+        runtime_account = self.account_loader(account_user_id)
+        runtime = runtime_account if isinstance(runtime_account, dict) else {}
+        state_account = _find_production_state_account(account_user_id)
+        merged = dict(state_account)
+        merged.update(runtime)
+        return merged
+
+    def _state_root(self) -> Path:
+        if self.state_dir:
+            return Path(self.state_dir)
+        return _state_dir() / "3d-rubric-adapter"
 
     def _state_path(self, adapter_run_id: str) -> Path:
         safe_run_id = "".join(ch for ch in str(adapter_run_id) if ch.isalnum() or ch in {"-", "_"})
         if not safe_run_id:
             raise ValueError("adapter_run_id 不能为空。")
-        return _research_state_dir(self.state_dir) / f"{safe_run_id}.json"
+        return self._state_root() / f"{safe_run_id}.json"
 
     def _write_snapshot(self, snapshot: TaskAutoRunAdapterSnapshot) -> None:
         path = self._state_path(snapshot.adapter_run_id)
@@ -1147,18 +1517,20 @@ class TaskAutoRun3dRubricAdapter:
             "message": snapshot.message,
             "raw_adapter_run": snapshot.raw_adapter_run,
         }
-        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path = path.with_suffix(".json.tmp")
+        tmp_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+        tmp_path.replace(path)
 
     def _read_snapshot(self, adapter_run_id: str) -> TaskAutoRunAdapterSnapshot:
         path = self._state_path(adapter_run_id)
         if not path.exists():
-            raise ValueError(f"3D rubric adapter run 不存在：{adapter_run_id}")
+            raise ValueError(f"3D adapter run 不存在：{adapter_run_id}")
         payload = json.loads(path.read_text(encoding="utf-8"))
         return TaskAutoRunAdapterSnapshot(
             adapter_key=str(payload.get("adapter_key") or self.adapter_key),
             adapter_run_id=str(payload.get("adapter_run_id") or adapter_run_id),
-            task_id=str(payload.get("task_id") or ""),
-            node_id=str(payload.get("node_id") or "1"),
+            task_id=str(payload.get("task_id") or AIDP_3D_RUBRIC_TASK_ID),
+            node_id=str(payload.get("node_id") or AIDP_3D_RUBRIC_NODE_ID),
             status=str(payload.get("status") or "blocked"),
             stop_requested=bool(payload.get("stop_requested")),
             accounts=[_parse_account_state(item) for item in payload.get("accounts", []) if isinstance(item, dict)],
@@ -1281,12 +1653,17 @@ def tick_task_auto_run(
     *,
     adapters: Optional[Sequence[Any]] = None,
     state_dir: Optional[Path] = None,
+    db: Optional[Session] = None,
 ) -> TaskAutoRunResponse:
     current = _read_run_state(run_id, state_dir=state_dir)
     adapter = _resolve_adapter_by_key(current.adapter_key, adapters)
     if adapter is None or not hasattr(adapter, "tick"):
         raise ValueError("该题型自动执行器尚未接入 tick。")
-    snapshot = adapter.tick(current.adapter_run_id)
+    tick_signature = inspect.signature(adapter.tick)
+    if "db" in tick_signature.parameters:
+        snapshot = adapter.tick(current.adapter_run_id, db=db)
+    else:
+        snapshot = adapter.tick(current.adapter_run_id)
     updated = _response_from_snapshot(snapshot, run_id=current.run_id, ability_version=current.ability_version)
     _write_run_state(updated, state_dir=state_dir)
     return updated
@@ -1334,7 +1711,7 @@ def update_task_auto_run_raw_config(run: TaskAutoRunResponse, run_config: dict[s
 
 
 def default_task_auto_run_adapters() -> list[Any]:
-    return [TaskAutoRunBon8Adapter(), TaskAutoRunResearchChartAdapter(), TaskAutoRun3dRubricAdapter()]
+    return [TaskAutoRunBon8Adapter(), TaskAutoRunResearchChartAdapter(), TaskAutoRun3DRubricAdapter()]
 
 
 def _snapshot_from_bon8(run: Bon8ProductionRunResponse) -> TaskAutoRunAdapterSnapshot:
@@ -1781,6 +2158,24 @@ def _data_root() -> Path:
 def _safe_file_part(value: str) -> str:
     safe = "".join(ch for ch in str(value or "") if ch.isalnum() or ch in {"-", "_"})
     return safe or "unknown"
+
+
+def _normalize_3d_worker_event_stage_step(stage: str, step: str) -> tuple[str, str]:
+    answer_steps = {"prepare_context", "call_provider", "parse_answer", "temp_save", "submit_answer", "readback_result", "ledger_update"}
+    runtime_steps = {"heartbeat", "bind_account", "claim_task", "version_update", "log_summary"}
+    raw_stage = str(stage or "")
+    raw_step = str(step or "")
+    if raw_stage == "read_current":
+        return "3d_http_answer", "prepare_context"
+    if raw_stage == "3d_http_answer" and raw_step in answer_steps:
+        return raw_stage, raw_step
+    if raw_stage in answer_steps:
+        return "3d_http_answer", raw_stage
+    if raw_step in answer_steps:
+        return "3d_http_answer", raw_step
+    if raw_stage == "worker_runtime" and raw_step in runtime_steps:
+        return raw_stage, raw_step
+    return "worker_runtime", "log_summary"
 
 
 def _find_production_state_account(account_user_id: str) -> dict[str, Any]:

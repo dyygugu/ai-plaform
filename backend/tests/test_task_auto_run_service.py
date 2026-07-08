@@ -23,7 +23,7 @@ from app.schemas.task_auto_runs import TaskAutoRunStartRequest
 from app.services.task_auto_run_service import (
     RESEARCH_CHART_TASK_ID,
     RESEARCH_CHART_TASK_IDS,
-    TaskAutoRun3dRubricAdapter,
+    TaskAutoRun3DRubricAdapter,
     TaskAutoRunAdapterSnapshot,
     TaskAutoRunBon8Adapter,
     TaskAutoRunResearchChartAdapter,
@@ -32,6 +32,7 @@ from app.services.task_auto_run_service import (
     start_task_auto_run,
     stop_task_auto_run,
 )
+from app.services.aidp_3d_http_answer_service import AIDP_3D_RUBRIC_TASK_ID, Aidp3DAnswerError
 from app.services.task_ability_service import build_task_ability_run_context
 from app.services.task_ability_service import record_task_ability_run
 from app.services.task_rules import utc_now
@@ -262,48 +263,60 @@ class TaskAutoRunServiceTests(unittest.TestCase):
     def test_research_chart_task_id_set_includes_full_dataset_task(self) -> None:
         self.assertIn("7639402643386830630", RESEARCH_CHART_TASK_IDS)
 
-    def test_3d_rubric_adapter_supports_enabled_task_type_without_hardcoded_task_id(self) -> None:
+    def test_3d_rubric_adapter_is_available_for_authorized_task(self) -> None:
+        adapter = TaskAutoRun3DRubricAdapter(account_loader=_account_loader)
+
+        self.assertIn(AIDP_3D_RUBRIC_TASK_ID, adapter.supported_task_ids)
+        self.assertEqual(adapter.adapter_key, "3d_rubric")
+
+    def test_3d_rubric_preflight_requires_account_cookie_and_writable_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
-            store = Path(temp_dir) / "task-abilities" / "ability-drafts.json"
-            _write_3d_rubric_ability_store(store, task_id="7658232870117527347")
-            adapter = TaskAutoRun3dRubricAdapter(ability_store_path=store, account_loader=_account_loader)
+            adapter = TaskAutoRun3DRubricAdapter(
+                state_dir=Path(temp_dir) / "state",
+                evidence_root=Path(temp_dir) / "evidence",
+                account_loader=_account_loader,
+            )
 
-            self.assertTrue(adapter.supports_task("7658232870117527347"))
-            self.assertFalse(adapter.supports_task("unknown-task"))
-
-    def test_3d_rubric_preflight_requires_enabled_ability_account_and_verified_writer(self) -> None:
-        with tempfile.TemporaryDirectory() as temp_dir:
-            store = Path(temp_dir) / "task-abilities" / "ability-drafts.json"
-            _write_3d_rubric_ability_store(store, enabled=False)
-            adapter = TaskAutoRun3dRubricAdapter(ability_store_path=store, account_loader=_account_loader)
-
-            blocked = adapter.preflight(TaskAutoRunStartRequest(task_id="7658232870117527347", node_id="1", account_user_ids=["account-1"]))
+            blocked = adapter.preflight(TaskAutoRunStartRequest(task_id=AIDP_3D_RUBRIC_TASK_ID, node_id="1", account_user_ids=[]))
 
             self.assertFalse(blocked.can_start)
             self.assertEqual(blocked.adapter_key, "3d_rubric")
-            self.assertIn("真实题不提交审核", blocked.next_step)
+            self.assertIn("阻塞", blocked.message)
 
-            _write_3d_rubric_ability_store(store, enabled=True)
-            writer_blocked = adapter.preflight(TaskAutoRunStartRequest(task_id="7658232870117527347", node_id="1", account_user_ids=["account-1"]))
+            ready = adapter.preflight(TaskAutoRunStartRequest(task_id=AIDP_3D_RUBRIC_TASK_ID, node_id="1", account_user_ids=["account-1"]))
 
-            self.assertFalse(writer_blocked.can_start)
-            self.assertEqual(writer_blocked.runnable_account_count, 0)
-            self.assertTrue(any(check.key == "remote_writer" and check.status == "blocked" for check in writer_blocked.checks))
-            self.assertIn("暂存字段", writer_blocked.next_step)
+            self.assertTrue(ready.can_start)
+            self.assertEqual(ready.runnable_account_count, 1)
+            self.assertTrue(any(check.key == "evidence_storage" and check.status == "passed" for check in ready.checks))
 
-    def test_3d_rubric_tick_fails_closed_until_remote_writer_exists(self) -> None:
+    def test_3d_rubric_tick_records_answer_service_failure_evidence(self) -> None:
         db = _session()
         with tempfile.TemporaryDirectory() as temp_dir:
-            store = Path(temp_dir) / "task-abilities" / "ability-drafts.json"
             state_dir = Path(temp_dir) / "state"
-            _write_3d_rubric_ability_store(store, enabled=True)
-            adapter = TaskAutoRun3dRubricAdapter(ability_store_path=store, state_dir=state_dir, account_loader=_account_loader)
+            evidence_root = Path(temp_dir) / "evidence"
 
-            snapshot = adapter.start(db, TaskAutoRunStartRequest(task_id="7658232870117527347", node_id="1", account_user_ids=["account-1"]))
+            class _FailingAnswerService:
+                def submit_one(self, **_kwargs) -> dict:
+                    raise Aidp3DAnswerError(
+                        "LOW_CONFIDENCE",
+                        "qwen 置信度不足，停止本题。",
+                        stage="call_provider",
+                        evidence={"item_id": "item-1", "attempted": False, "worker_step": "call_provider"},
+                    )
+
+            adapter = TaskAutoRun3DRubricAdapter(
+                state_dir=state_dir,
+                evidence_root=evidence_root,
+                account_loader=_account_loader,
+                answer_service=_FailingAnswerService(),
+            )
+
+            snapshot = adapter.start(db, TaskAutoRunStartRequest(task_id=AIDP_3D_RUBRIC_TASK_ID, node_id="1", account_user_ids=["account-1"]))
             ticked = adapter.tick(snapshot.adapter_run_id)
+            evidence = ticked.raw_adapter_run["account_evidence"]["account-1"]
 
             self.assertEqual(ticked.status, "blocked")
-            self.assertIn("暂存字段", ticked.last_error)
+            self.assertEqual(evidence["error_code"], "LOW_CONFIDENCE")
             self.assertFalse(ticked.accounts[0].healthy)
 
     def test_start_bon8_creates_generic_run_and_persists_adapter_mapping(self) -> None:
@@ -1746,6 +1759,80 @@ class TaskAutoRunServiceTests(unittest.TestCase):
                 worker_status = client.get(f"/api/v1/task-auto-runs/runs/{run_id}/worker/status")
                 self.assertEqual(worker_status.status_code, 200, worker_status.text)
                 self.assertTrue(worker_status.json()["active"])
+        db.close()
+
+    def test_task_auto_run_worker_start_does_not_activate_after_final_generic_tick(self) -> None:
+        db = _session()
+        app = FastAPI()
+
+        class FinalGenericAdapter:
+            adapter_key = "fake_final"
+            supported_task_ids = {"fake-final-task"}
+
+            def __init__(self) -> None:
+                self.snapshot: TaskAutoRunAdapterSnapshot | None = None
+
+            def start(self, _db, request: TaskAutoRunStartRequest) -> TaskAutoRunAdapterSnapshot:
+                self.snapshot = TaskAutoRunAdapterSnapshot(
+                    adapter_key=self.adapter_key,
+                    adapter_run_id="fake-final-adapter-run",
+                    task_id=str(request.task_id),
+                    node_id=str(request.node_id or "1"),
+                    status="running_auto",
+                    stop_requested=False,
+                    accounts=[
+                        TaskAutoRunAccountState(
+                            account_user_id="account-sample-002",
+                            account_name="账号002",
+                            status="running_auto",
+                            healthy=True,
+                        )
+                    ],
+                    last_error="",
+                    next_step="",
+                    message="fake started",
+                    raw_adapter_run={"adapter": self.adapter_key},
+                )
+                return self.snapshot
+
+            def get(self, _adapter_run_id: str) -> TaskAutoRunAdapterSnapshot:
+                assert self.snapshot is not None
+                return self.snapshot
+
+            def tick(self, _adapter_run_id: str) -> TaskAutoRunAdapterSnapshot:
+                assert self.snapshot is not None
+                self.snapshot.status = "blocked"
+                self.snapshot.last_error = "final blocked"
+                self.snapshot.message = "fake blocked"
+                self.snapshot.accounts = [
+                    _copy_model(self.snapshot.accounts[0], update={"status": "isolated_failed", "healthy": False, "last_error": "final blocked"})
+                ]
+                return self.snapshot
+
+            def stop(self, _adapter_run_id: str) -> TaskAutoRunAdapterSnapshot:
+                assert self.snapshot is not None
+                self.snapshot.status = "stopped"
+                return self.snapshot
+
+        from app.services.task_auto_run_service import _copy_model
+
+        app.state.task_auto_run_adapters = [FinalGenericAdapter()]
+        app.state.task_auto_run_state_dir = Path(tempfile.mkdtemp())
+        app.dependency_overrides[get_db] = lambda: db
+        app.include_router(api_router, prefix="/api/v1")
+        with TestClient(app) as client:
+            started = client.post(
+                "/api/v1/task-auto-runs/start",
+                json={"task_id": "fake-final-task", "node_id": "1", "account_user_ids": ["account-sample-002"]},
+            )
+            self.assertEqual(started.status_code, 200, started.text)
+            run_id = started.json()["run_id"]
+
+            worker = client.post(f"/api/v1/task-auto-runs/runs/{run_id}/worker/start", json={"interval_seconds": 1})
+            self.assertEqual(worker.status_code, 200, worker.text)
+            self.assertTrue(worker.json()["last_ok"])
+            self.assertFalse(worker.json()["active"])
+            self.assertEqual(worker.json()["cycle_count"], 1)
         db.close()
 
     def test_task_auto_run_worker_start_runs_bon8_first_tick_immediately(self) -> None:

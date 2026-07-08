@@ -70,8 +70,8 @@ async def start_auto_run_worker(run_id: str, payload: TaskAutoRunWorkerStartRequ
             tick_func=lambda: _run_generic_auto_tick(request, run.run_id),
             interval_seconds=payload.interval_seconds,
         )
-        await worker.run_once()
-        if worker.status.last_ok:
+        first_tick = await worker.run_once()
+        if worker.status.last_ok and not _is_final_auto_run(first_tick):
             worker.start()
         return _generic_worker_status_response(run.run_id, run.adapter_run_id, worker.snapshot())
     registry = _bon8_worker_registry(request)
@@ -136,12 +136,12 @@ def _generic_worker_registry(request: Request) -> GenericTaskAutoRunWorkerRegist
     return registry
 
 
-def _run_generic_auto_tick(request: Request, run_id: str) -> None:
+def _run_generic_auto_tick(request: Request, run_id: str) -> TaskAutoRunResponse:
     run = read_auto_run(run_id, request)
     adapter = _adapter_by_key(request, run.adapter_key)
     if adapter is None or not hasattr(adapter, "tick"):
         raise ValueError("该题型自动执行器尚未接入后台循环。")
-    tick_task_auto_run(run_id, adapters=_adapters(request), state_dir=_state_dir(request))
+    return tick_task_auto_run(run_id, adapters=_adapters(request), state_dir=_state_dir(request))
 
 
 def _worker_status_response(run_id: str, adapter_run_id: str, status: Bon8RunWorkerStatus) -> TaskAutoRunWorkerStatusResponse:
@@ -156,3 +156,13 @@ def _generic_worker_status_response(run_id: str, adapter_run_id: str, status: Ge
     payload["run_id"] = run_id
     payload["adapter_run_id"] = adapter_run_id
     return TaskAutoRunWorkerStatusResponse(**payload)
+
+
+def _is_final_auto_run(result: object) -> bool:
+    if result is None:
+        return False
+    if isinstance(result, dict):
+        status = str(result.get("status") or "").strip().lower()
+    else:
+        status = str(getattr(result, "status", "") or "").strip().lower()
+    return status in {"stopped", "blocked", "completed", "completed_no_item", "failed", "executor_pending"}

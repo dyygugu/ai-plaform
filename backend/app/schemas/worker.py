@@ -9,6 +9,7 @@ WORKER_EVENT_STEPS_BY_STAGE: dict[str, list[str]] = {
     "ai_draft": ["prepare_context", "call_provider", "parse_answer", "save_draft"],
     "manual_confirmation": ["queue_confirmation", "approve", "reject", "expire"],
     "submit_readback": ["submit_answer", "readback_result", "confirm_delivered", "rollback"],
+    "3d_http_answer": ["prepare_context", "call_provider", "parse_answer", "temp_save", "submit_answer", "readback_result", "ledger_update"],
     "worker_runtime": ["heartbeat", "bind_account", "claim_task", "version_update", "log_summary"],
 }
 
@@ -19,8 +20,13 @@ WORKER_EVENT_ERROR_CODES: list[str] = [
     "AI_PROVIDER_502",
     "AI_PROVIDER_TIMEOUT",
     "AI_RESPONSE_INVALID",
+    "DUPLICATE_SUBMITTED",
     "CONFIRMATION_PENDING",
     "CONFIRMATION_REJECTED",
+    "LEDGER_IN_PROGRESS_UNKNOWN",
+    "LOW_CONFIDENCE",
+    "MISSING_REQUIRED_IMAGE",
+    "NO_CURRENT_ITEM",
     "SUBMIT_FAILED",
     "READBACK_MISMATCH",
     "WORKER_OFFLINE",

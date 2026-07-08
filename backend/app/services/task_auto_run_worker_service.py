@@ -40,10 +40,17 @@ class GenericTaskAutoRunWorkerScheduler:
         try:
             result = await self._call_tick()
             self.status.last_ok = True
+            if _is_final_tick_result(result):
+                self.status.active = False
+                if self._stop_event is not None:
+                    self._stop_event.set()
             return result
         except Exception as exc:  # noqa: BLE001
             self.status.last_ok = False
             self.status.last_error = str(exc)
+            self.status.active = False
+            if self._stop_event is not None:
+                self._stop_event.set()
             return None
         finally:
             self.status.running = False
@@ -51,6 +58,9 @@ class GenericTaskAutoRunWorkerScheduler:
             self.status.next_run_at = _future_text(self.interval_seconds) if self.status.active else None
 
     def start(self) -> GenericTaskAutoRunWorkerStatus:
+        if self._task is not None and self._task.done():
+            self._task = None
+            self._stop_event = None
         if self._task is not None:
             return self.snapshot()
         self.status.active = True
@@ -80,6 +90,8 @@ class GenericTaskAutoRunWorkerScheduler:
             if self._stop_event is None or self._stop_event.is_set():
                 break
             await self.run_once()
+            if self.status.last_ok is False or not self.status.active:
+                break
 
     async def _wait(self, seconds: int) -> None:
         if self._stop_event is None:
@@ -135,3 +147,13 @@ def _now_text() -> str:
 
 def _future_text(seconds: int) -> str:
     return datetime.fromtimestamp(datetime.now(timezone.utc).timestamp() + seconds, tz=timezone.utc).astimezone().replace(microsecond=0).isoformat()
+
+
+def _is_final_tick_result(result: Any) -> bool:
+    if result is None:
+        return False
+    if isinstance(result, dict):
+        status = str(result.get("status") or "").strip().lower()
+    else:
+        status = str(getattr(result, "status", "") or "").strip().lower()
+    return status in {"stopped", "blocked", "completed", "completed_no_item", "failed", "executor_pending"}
