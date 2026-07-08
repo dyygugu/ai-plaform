@@ -39,6 +39,8 @@ MANUAL_RECOVERY_ERROR_CODES = {
     "SUBMIT_FAILED",
     "READBACK_MISMATCH",
 }
+BLOCKED_WORKER_STATUSES = {WorkerStatus.REJECTED, WorkerStatus.DISABLED}
+SCHEDULABLE_WORKER_STATUSES = {WorkerStatus.ONLINE, WorkerStatus.DEGRADED}
 
 
 def ensure_platform_worker(db: Session, inherited_http_account_slots: int) -> Worker:
@@ -46,13 +48,16 @@ def ensure_platform_worker(db: Session, inherited_http_account_slots: int) -> Wo
     now = utc_now()
     slots = max(0, int(inherited_http_account_slots or 0))
     worker.display_name = "平台本机执行器"
-    worker.status = WorkerStatus.ONLINE
     worker.is_platform_worker = True
-    worker.configured_http_account_slots = slots
-    worker.effective_http_account_slots = slots
-    worker.health_status = "passed"
+    if worker.status in BLOCKED_WORKER_STATUSES:
+        worker.effective_http_account_slots = 0
+    else:
+        worker.status = WorkerStatus.ONLINE
+        worker.configured_http_account_slots = slots
+        worker.effective_http_account_slots = slots
+        worker.health_status = "passed"
+        worker.health_fail_reasons = ""
     worker.health_checked_at = now
-    worker.health_fail_reasons = ""
     worker.last_heartbeat_at = now
     db.flush()
     return worker
@@ -186,6 +191,12 @@ def check_worker_command_execution_gate(db: Session, command_id: str, *, worker_
 
     owner_ok = command.worker_id == worker_id
     add_check("command_owner", "命令归属", owner_ok, "命令归属当前 Worker" if owner_ok else f"命令归属 {command.worker_id or '未分配'}")
+
+    worker = db.scalar(select(Worker).where(Worker.worker_id == worker_id))
+    worker_status = worker.status if worker is not None else None
+    worker_ok = worker_status in SCHEDULABLE_WORKER_STATUSES
+    worker_status_text = worker_status.value if hasattr(worker_status, "value") else str(worker_status or "missing")
+    add_check("worker_status", "Worker 状态", worker_ok, f"当前状态 {worker_status_text}")
 
     status_ok = command.status in {WorkerCommandStatus.CLAIMED, WorkerCommandStatus.RUNNING}
     add_check("command_status", "命令状态", status_ok, f"当前状态 {command.status.value if hasattr(command.status, 'value') else command.status}")
@@ -336,6 +347,7 @@ def disable_worker_and_reclaim(db: Session, worker_id: str, *, reason: str = "")
     worker = ensure_worker(db, worker_id)
     worker.status = WorkerStatus.DISABLED
     worker.disabled_reason = reason
+    worker.effective_http_account_slots = 0
     active_leases = list(
         db.scalars(
             select(WorkerAccountTaskLease).where(
@@ -527,7 +539,7 @@ def _available_workers(db: Session) -> list[Worker]:
         db.scalars(
             select(Worker)
             .where(
-                Worker.status.in_([WorkerStatus.ONLINE, WorkerStatus.DEGRADED]),
+                Worker.status.in_(SCHEDULABLE_WORKER_STATUSES),
                 Worker.effective_http_account_slots > 0,
             )
             .order_by(Worker.is_platform_worker.desc(), Worker.id.asc())

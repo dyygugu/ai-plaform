@@ -11,6 +11,7 @@ from app.models.account import AidpAccount
 from app.models.audit import AuditSeverity
 from app.models.task import TaskCatalogItem
 from app.schemas.final_acceptance import FinalAcceptanceItem, FinalAcceptanceMatrixResponse, FinalEvidenceRequest, FinalEvidenceResponse, RollbackDrillStep
+from app.services.api_paths import api_path, public_api_url
 from app.services.audit_service import write_audit
 from app.services.data_quality_service import build_data_quality_summary
 from app.services.incident_service import build_incident_summary
@@ -57,16 +58,16 @@ def build_final_acceptance_matrix(db: Session) -> FinalAcceptanceMatrixResponse:
             "7 账号原生基线与覆盖",
             account_check.status if account_check else ("passed" if data_quality.account_count == 7 else "failed"),
             True,
-            "/api/v1/accounts",
+            api_path("/accounts", settings),
             account_check.actual if account_check else f"生产账号 {data_quality.account_count} 个。",
         ),
-        _item("tasks", "任务", "任务目录与待处理数字", "passed" if tasks else "failed", True, "/api/v1/tasks/catalog", f"当前任务数 {len(tasks)}。"),
-        _item("earnings", "收益", "P17 收益口径", data_quality.status, True, "/api/v1/data-quality/summary", f"收益行数 {data_quality.earnings_row_count}，今日收益 {data_quality.today_income_total}。"),
-        _item("alerts", "告警", "P11/P18 告警与闭环", "passed" if incidents.total_open == 0 else "warning", True, "/api/v1/incidents/summary", f"open={incidents.total_open}，critical={incidents.critical_count}。"),
-        _item("inspection", "巡检", "P13 日常巡检", "passed", True, "/api/v1/inspection/summary", "巡检中心和巡检记录已纳入证据链。"),
-        _item("freeze", "冻结", "P14 冻结基线", "passed", True, "/api/v1/freeze/summary", "冻结清单与回滚项已纳入证据链。"),
-        _item("release_gate", "发布", "发布门禁", "passed" if release_ready else "warning", True, "/api/v1/ops/release-gate", f"release_ready={release_ready}，checks={len(release_checks)}。"),
-        _item("domain_runbook", "回滚", "手动域名 Runbook", "passed" if domain_ready else "warning", True, "/api/v1/ops/domain-switch-runbook", "正式域名仅手动切换，回滚步骤保留。"),
+        _item("tasks", "任务", "任务目录与待处理数字", "passed" if tasks else "failed", True, api_path("/tasks/catalog", settings), f"当前任务数 {len(tasks)}。"),
+        _item("earnings", "收益", "P17 收益口径", data_quality.status, True, api_path("/data-quality/summary", settings), f"收益行数 {data_quality.earnings_row_count}，今日收益 {data_quality.today_income_total}。"),
+        _item("alerts", "告警", "P11/P18 告警与闭环", "passed" if incidents.total_open == 0 else "warning", True, api_path("/incidents/summary", settings), f"open={incidents.total_open}，critical={incidents.critical_count}。"),
+        _item("inspection", "巡检", "P13 日常巡检", "passed", True, api_path("/inspection/summary", settings), "巡检中心和巡检记录已纳入证据链。"),
+        _item("freeze", "冻结", "P14 冻结基线", "passed", True, api_path("/freeze/summary", settings), "冻结清单与回滚项已纳入证据链。"),
+        _item("release_gate", "发布", "发布门禁", "passed" if release_ready else "warning", True, api_path("/ops/release-gate", settings), f"release_ready={release_ready}，checks={len(release_checks)}。"),
+        _item("domain_runbook", "回滚", "手动域名 Runbook", "passed" if domain_ready else "warning", True, api_path("/ops/domain-switch-runbook", settings), "正式域名仅手动切换，回滚步骤保留。"),
         _item("screenshots", "证据", "P7-P18 截图", "passed" if screenshot_ready else "warning", False, "output/playwright", f"已检测截图 {_screenshot_count()} 张。"),
         _item("latest_report", "证据", "最新 acceptance 报告", "passed" if latest_report else "warning", False, latest_report or "reports/acceptance-*.md", "自动验收报告用于最终证据包。"),
         _item("data_quality_report", "证据", "P17 数据报告", "passed" if latest_data_quality else "warning", False, latest_data_quality or "data/reports/data-quality-baseline-*.md", "收益口径与一致性检查报告。"),
@@ -138,6 +139,8 @@ def _item(key: str, category: str, title: str, status: str, required: bool, evid
 
 
 def _rollback_steps(base_url: str, runbook: list[object]) -> list[RollbackDrillStep]:
+    health_url = public_api_url("/health")
+    domain_runbook_path = api_path("/ops/domain-switch-runbook")
     steps = [
         RollbackDrillStep(
             key="pre_switch_upstream_preserved",
@@ -154,7 +157,7 @@ def _rollback_steps(base_url: str, runbook: list[object]) -> list[RollbackDrillS
             order=2,
             title="新版 8789 保留现场",
             status="passed",
-            operator_action=f"打开 {base_url} 与 /api/v1/health。",
+            operator_action=f"打开 {base_url} 与 {health_url}。",
             expected_result="新版健康接口 ok，页面可见。",
             rollback_action="保留 8789 容器日志与证据包用于排查。",
             evidence_path=base_url,
@@ -167,7 +170,7 @@ def _rollback_steps(base_url: str, runbook: list[object]) -> list[RollbackDrillS
             operator_action="P20 完成前不修改 manage.51gugu.uk 反代。",
             expected_result="正式域名切换由用户最终人工执行。",
             rollback_action="若切换后异常，立即恢复切换前 upstream。",
-            evidence_path="/api/v1/ops/domain-switch-runbook",
+            evidence_path=domain_runbook_path,
         ),
     ]
     for step in runbook:
@@ -180,7 +183,7 @@ def _rollback_steps(base_url: str, runbook: list[object]) -> list[RollbackDrillS
                 operator_action=step.command_or_action,
                 expected_result=step.expected_result,
                 rollback_action=step.rollback_note or "按回滚清单处理。",
-                evidence_path="/api/v1/ops/domain-switch-runbook",
+                evidence_path=domain_runbook_path,
             )
         )
     return steps

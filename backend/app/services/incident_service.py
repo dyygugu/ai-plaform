@@ -12,6 +12,7 @@ from app.models.score_loop import ScoreLoopCase, ScoreLoopCaseStatus
 from app.schemas.alerting import AlertEvaluationRequest, AlertIncident
 from app.schemas.incident import IncidentClosureCheck, IncidentClosurePlanResponse, IncidentClosureRequest, IncidentClosureResponse, IncidentQueueItem, IncidentRunbookItem, IncidentSummaryResponse
 from app.services.alerting_service import evaluate_alerts, list_alert_rules
+from app.services.api_paths import api_path
 from app.services.audit_service import write_audit
 from app.services.data_quality_service import build_data_quality_summary
 from app.services.task_rules import utc_now
@@ -134,7 +135,7 @@ def _build_runbooks(db: Session) -> list[IncidentRunbookItem]:
             severity="warning",
             trigger="P17 数据质量 status=passed",
             owner="数据值守",
-            evidence_path="/api/v1/data-quality/summary",
+            evidence_path=api_path("/data-quality/summary"),
             steps=[
                 "打开数据校验页确认失败检查项。",
                 "优先修复账号数、任务目录、收益行数或待处理数字口径。",

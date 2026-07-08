@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import requests
 from fastapi.testclient import TestClient
 
 
@@ -102,6 +103,46 @@ class SubmittedHistoryApiTests(unittest.TestCase):
                         fetched = client.get(f"/api/v1/tasks/{task_id}/testset")
                         self.assertEqual(fetched.status_code, 200, fetched.text)
                         self.assertEqual(fetched.json()["sample_ids"], generated_payload["sample_ids"])
+
+    def test_sync_submitted_history_returns_readable_error_for_upstream_runtime_failure(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            app = self._create_app(tmpdir)
+            task_id = "7658232870117527347"
+            with patch("app.services.submitted_history_service.load_account_with_cookie", return_value={"userId": "account-sample-002", "cookie": "sessionid=test"}):
+                with patch("app.services.submitted_history_service.read_all_submitted_task_payloads", side_effect=RuntimeError("search_item/category returned BaseResp=-1")):
+                    with TestClient(app, raise_server_exceptions=False) as client:
+                        response = client.post(f"/api/v1/tasks/{task_id}/submitted-history/sync", json={"account_id": "account-sample-002"})
+
+                        self.assertEqual(response.status_code, 502, response.text)
+                        self.assertIn("同步已提交样本失败", response.json()["detail"])
+                        self.assertIn("BaseResp=-1", response.json()["detail"])
+
+    def test_sync_submitted_history_returns_readable_error_for_upstream_http_failure(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            app = self._create_app(tmpdir)
+            task_id = "7658232870117527347"
+            with patch("app.services.submitted_history_service.load_account_with_cookie", return_value={"userId": "account-sample-002", "cookie": "sessionid=test"}):
+                with patch("app.services.submitted_history_service.read_all_submitted_task_payloads", side_effect=requests.HTTPError("403 Client Error")):
+                    with TestClient(app, raise_server_exceptions=False) as client:
+                        response = client.post(f"/api/v1/tasks/{task_id}/submitted-history/sync", json={"account_id": "account-sample-002"})
+
+                        self.assertEqual(response.status_code, 502, response.text)
+                        self.assertIn("同步已提交样本失败", response.json()["detail"])
+                        self.assertIn("上游接口请求失败", response.json()["detail"])
+
+    def test_sync_submitted_history_treats_invalid_upstream_json_as_upstream_failure(self) -> None:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
+            app = self._create_app(tmpdir)
+            task_id = "7658232870117527347"
+            invalid_json = requests.exceptions.JSONDecodeError("invalid json", "not-json", 0)
+            with patch("app.services.submitted_history_service.load_account_with_cookie", return_value={"userId": "account-sample-002", "cookie": "sessionid=test"}):
+                with patch("app.services.submitted_history_service.read_all_submitted_task_payloads", side_effect=invalid_json):
+                    with TestClient(app, raise_server_exceptions=False) as client:
+                        response = client.post(f"/api/v1/tasks/{task_id}/submitted-history/sync", json={"account_id": "account-sample-002"})
+
+                        self.assertEqual(response.status_code, 502, response.text)
+                        self.assertIn("同步已提交样本失败", response.json()["detail"])
+                        self.assertIn("上游接口请求失败", response.json()["detail"])
 
 
 if __name__ == "__main__":

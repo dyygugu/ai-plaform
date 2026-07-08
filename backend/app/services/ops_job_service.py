@@ -18,6 +18,7 @@ from app.models.worker import Worker, WorkerStatus
 from app.schemas.ops_job import DomainSwitchRunbookStep, MaintenanceJobDefinitionRead, MaintenanceJobRunRead, ReleaseGateCheck, SchedulerJobPlan
 from app.services.account_health_service import refresh_account_health
 from app.services.account_service import list_accounts
+from app.services.api_paths import api_path, public_api_url
 from app.services.backup_service import cleanup_old_backup_artifacts, create_manual_backup
 from app.services.restore_service import run_restore_drill
 from app.services.task_rules import utc_now
@@ -260,6 +261,8 @@ def build_domain_switch_runbook(db: Session) -> tuple[list[ReleaseGateCheck], bo
     checks, ready = build_release_gate(db)
     settings = get_settings()
     target_base_url = settings.public_base_url
+    release_gate_path = api_path("/ops/release-gate", settings)
+    health_url = public_api_url("/health", settings)
     steps = [
         DomainSwitchRunbookStep(
             order=1,
@@ -271,7 +274,7 @@ def build_domain_switch_runbook(db: Session) -> tuple[list[ReleaseGateCheck], bo
         DomainSwitchRunbookStep(
             order=2,
             title="确认发布门禁",
-            command_or_action="刷新 /ops 生产护栏，确认 release-gate 必需项通过。",
+            command_or_action=f"刷新 {release_gate_path} 生产护栏，确认 release-gate 必需项通过。",
             expected_result="ready_for_manual_domain_switch=true，manual_switch_required=true。",
             rollback_note="如任一必需项失败，保持 manage.51gugu.uk 指向当前稳定 upstream。",
         ),
@@ -285,7 +288,7 @@ def build_domain_switch_runbook(db: Session) -> tuple[list[ReleaseGateCheck], bo
         DomainSwitchRunbookStep(
             order=4,
             title="切换后验证",
-            command_or_action="访问 manage.51gugu.uk/api/v1/health、/tasks、/ops，并检查审计日志。",
+            command_or_action=f"访问 {health_url}、页面 /tasks、/ops，并检查审计日志。",
             expected_result="健康接口 ok，任务待处理数字正确，发布门禁可读。",
             rollback_note="若页面或接口异常，立即执行回滚步骤。",
         ),

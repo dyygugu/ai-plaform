@@ -9,6 +9,7 @@ from app.models.worker import Worker, WorkerAccountTaskLease, WorkerLeaseStatus,
 from app.schemas.execution_devices import DeletedExecutionDeviceRead, ExecutionDeviceDeleteResponse, ExecutionDeviceRead
 from app.schemas.worker import WorkerApproveRequest
 from app.services.task_rules import utc_now
+from app.services.worker_dispatch_service import disable_worker_and_reclaim
 from app.services.worker_service import approve_worker, ensure_worker
 
 
@@ -64,10 +65,8 @@ def reject_execution_device(db: Session, worker_id: str) -> ExecutionDeviceRead:
 
 
 def disable_execution_device(db: Session, worker_id: str) -> ExecutionDeviceRead:
+    disable_worker_and_reclaim(db, worker_id, reason="执行设备管理禁用")
     worker = ensure_worker(db, worker_id)
-    worker.status = WorkerStatus.DISABLED
-    worker.disabled_reason = "执行设备管理禁用"
-    db.flush()
     return _device_read(db, worker)
 
 

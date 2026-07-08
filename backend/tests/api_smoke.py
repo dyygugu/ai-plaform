@@ -136,9 +136,13 @@ def main() -> None:
             assert task_refresh_worker.status_code == 200, task_refresh_worker.text
             assert any('"stage":"task_refresh"' in item["message"] and '"step":"finish"' in item["message"] for item in task_refresh_worker.json()["log_summary"]["events"])
             assert refresh.json()["imported_count"] == 1
-            refreshed_catalog = client.get("/api/v1/tasks/catalog")
+            refreshed_catalog = client.get("/api/v1/tasks/catalog", params={"source_account_user_id": "7635555555555555502"})
             assert refreshed_catalog.json()["stale"] is True
             assert refreshed_catalog.json()["items"][0]["pending_raw"] == ""
+            aggregated_catalog = client.get("/api/v1/tasks/catalog")
+            assert aggregated_catalog.status_code == 200, aggregated_catalog.text
+            assert aggregated_catalog.json()["source_account_user_id"] == "all_accounts"
+            assert len({item["task_id"] for item in aggregated_catalog.json()["items"]}) == len(aggregated_catalog.json()["items"])
             coverage_summary = client.get("/api/v1/accounts/task-coverage/summary")
             assert coverage_summary.status_code == 200, coverage_summary.text
             assert coverage_summary.json()["account_count"] == 7

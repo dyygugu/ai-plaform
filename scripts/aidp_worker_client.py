@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import platform
 import socket
 import sys
@@ -23,6 +24,7 @@ class WorkerClient:
     display_name: str
     version: str
     estimated_http_account_slots: int
+    api_token: str = ""
     transport: Transport | None = None
 
     def run_once(self) -> JsonDict:
@@ -172,7 +174,7 @@ class WorkerClient:
     def request(self, method: str, path: str, payload: JsonDict | None = None) -> JsonDict:
         if self.transport is not None:
             return self.transport(method, path, payload)
-        return http_json_request(method, self.base_url.rstrip("/") + path, payload or {})
+        return http_json_request(method, self.base_url.rstrip("/") + path, payload or {}, api_token=self.api_token)
 
 
 class WorkerHttpError(RuntimeError):
@@ -182,13 +184,16 @@ class WorkerHttpError(RuntimeError):
         self.body = body
 
 
-def http_json_request(method: str, url: str, payload: JsonDict) -> JsonDict:
+def http_json_request(method: str, url: str, payload: JsonDict, *, api_token: str = "") -> JsonDict:
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    if api_token:
+        headers["X-AIDP-API-Token"] = api_token
     request = urllib.request.Request(
         url,
         data=body,
         method=method,
-        headers={"Content-Type": "application/json; charset=utf-8"},
+        headers=headers,
     )
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
@@ -203,12 +208,14 @@ def http_json_request(method: str, url: str, payload: JsonDict) -> JsonDict:
 
 
 def build_client(args: argparse.Namespace) -> WorkerClient:
+    api_token = str(args.api_token or os.environ.get("AIDP_PLATFORM_API_TOKEN") or os.environ.get("AIDP_BROWSER_EXTENSION_API_TOKEN") or "").strip()
     return WorkerClient(
         base_url=args.base_url,
         worker_id=args.worker_id,
         display_name=args.display_name or args.worker_id,
         version=args.version,
         estimated_http_account_slots=args.estimated_http_account_slots,
+        api_token=api_token,
     )
 
 
@@ -219,6 +226,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--display-name", default="")
     parser.add_argument("--version", default="0.2.0")
     parser.add_argument("--estimated-http-account-slots", type=int, default=1)
+    parser.add_argument("--api-token", default="", help="Platform API token. Defaults to AIDP_PLATFORM_API_TOKEN or AIDP_BROWSER_EXTENSION_API_TOKEN.")
     parser.add_argument("--once", action="store_true", help="Run one register/heartbeat/claim/result cycle")
     parser.add_argument("--interval-seconds", type=int, default=10)
     args = parser.parse_args(argv)

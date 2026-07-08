@@ -1,4 +1,4 @@
-import { createBrowserRouter, Navigate } from "react-router-dom";
+import { createBrowserRouter } from "react-router-dom";
 
 import { AppLayout } from "../layouts/AppLayout";
 import { AccountCoveragePage } from "../pages/AccountCoveragePage";
@@ -14,6 +14,7 @@ import { IncidentsPage } from "../pages/IncidentsPage";
 import { OpsPage } from "../pages/OpsPage";
 import { ObservabilityPage } from "../pages/ObservabilityPage";
 import { ProductionPage } from "../pages/ProductionPage";
+import { RulesPage } from "../pages/RulesPage";
 import { SecurityPage } from "../pages/SecurityPage";
 import { SettingsPage } from "../pages/SettingsPage";
 import { TasksPage } from "../pages/TasksPage";
@@ -30,7 +31,7 @@ export const router = createBrowserRouter([
     { path: "data-quality", element: <DataQualityPage /> },
     { path: "ai", element: <AiPage /> },
     { path: "workers", element: <WorkersPage /> },
-    { path: "rules", element: <Navigate to="/ability-workbench" replace /> },
+    { path: "rules", element: <RulesPage /> },
     { path: "backups", element: <BackupsPage /> },
     { path: "ops", element: <OpsPage /> },
     { path: "production", element: <ProductionPage /> },

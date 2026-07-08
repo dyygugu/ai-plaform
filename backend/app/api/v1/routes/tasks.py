@@ -42,9 +42,11 @@ from app.services.task_service import (
     read_prefix_rules,
     seed_task_catalog_item,
     seed_tasks_from_sample_summary,
+    sync_task_catalog_from_production_accounts,
     update_task_rule_config,
 )
 from app.services.task_capability_service import TaskCapabilityError, approve_provider_draft_review, build_http_question_context, build_media_inspection_draft, build_media_inspection_execution, build_media_inspection_plan, build_media_inspection_provider, build_operation_process_plan, build_or_execute_ai_temp_draft, build_or_execute_provider_temp_draft, build_or_execute_temp_draft, build_sandbox_click_draft, build_sandbox_click_execution, build_sandbox_click_plan, build_task_capability_card, build_video_keyframe_extraction, summarize_task_capability
+from app.services.production_dashboard_service import build_production_dashboard
 from app.services.worker_service import report_worker_event
 
 router = APIRouter(prefix="/tasks", tags=["tasks"])
@@ -201,12 +203,18 @@ def _task_refresh_error_code(error: Optional[str]) -> str:
 
 @router.get("/catalog", response_model=TaskCatalogListResponse)
 def read_task_catalog(source_account_user_id: Optional[str] = None, db: Session = Depends(get_db)) -> TaskCatalogListResponse:
-    source = source_account_user_id or get_task_source_account_user_id(db)
-    items = list_task_catalog(db, source)
+    source = str(source_account_user_id or "").strip()
+    items = list_task_catalog(db, source or None)
+    if not source and not items:
+        dashboard = build_production_dashboard(db)
+        if sync_task_catalog_from_production_accounts(db, dashboard.accounts):
+            write_audit(db, event_type="task_catalog_backfill", message="Backfilled task catalog from all production accounts", target_type="task")
+            db.commit()
+            items = list_task_catalog(db, None)
     stale = any(item.last_task_page_error for item in items)
     last_error = next((item.last_task_page_error for item in items if item.last_task_page_error), None)
     return TaskCatalogListResponse(
-        source_account_user_id=source,
+        source_account_user_id=source or "all_accounts",
         items=[_task_catalog_item_read(item) for item in items],
         stale=stale,
         last_error=last_error,

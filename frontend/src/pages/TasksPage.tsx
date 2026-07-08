@@ -10,6 +10,7 @@ import {
   fetchTaskOperationProcessPlan,
   fetchTaskRules,
   fetchProductionDashboard,
+  openAccountTarget,
   fetchTaskAbilityDrafts,
   approveTaskCapabilityReview,
   buildTaskMediaInspectionDraft,
@@ -24,10 +25,7 @@ import {
   buildTaskCapabilityDraft,
   buildTaskCapabilityProviderDraft,
   checkTaskAutoRunPreflight,
-  prepareBon8FirstItemReviewWithAi,
-  approveBon8ProductionRun,
   runTaskAbilityRealNoSubmit,
-  submitBon8FirstItem,
   fetchActiveTaskAutoRun,
   fetchTaskAutoRun,
   fetchTaskAutoProductionStatus,
@@ -36,8 +34,6 @@ import {
   refreshProductionAccounts,
   pauseAutoAnswerRun,
   resumeAutoAnswerRun,
-  startTaskAutoRun,
-  startTaskProduction,
   startTaskAutoRunWorker,
   stopAutoAnswerRun,
   stopTaskAutoRun,
@@ -374,7 +370,7 @@ export function TasksPage() {
   const [productionStatus, setProductionStatus] = useState<AutoProductionStatusResponse | null>(null);
   const [productionDevices, setProductionDevices] = useState<ExecutionDeviceItem[]>([]);
   const [productionForm, setProductionForm] = useState<StartProductionPayload>(() => defaultProductionForm());
-  const [productionMaxMode, setProductionMaxMode] = useState<"unlimited" | "limited">("unlimited");
+  const [productionMaxMode, setProductionMaxMode] = useState<"limited">("limited");
   const [productionLoading, setProductionLoading] = useState(false);
   const [selectedAutoAccountIds, setSelectedAutoAccountIds] = useState<string[]>([]);
   const [previewAccountUserId, setPreviewAccountUserId] = useState("");
@@ -384,13 +380,14 @@ export function TasksPage() {
   const [autoRunPreflight, setAutoRunPreflight] = useState<TaskAutoRunPreflightResponse | null>(null);
   const [autoRunWorkerStatus, setAutoRunWorkerStatus] = useState<TaskAutoRunWorkerStatusResponse | null>(null);
   const [noSubmitResult, setNoSubmitResult] = useState<UnifiedNoSubmitResult | null>(null);
-  const [sourceForm] = Form.useForm<{ taskSourceAccountUserId: string }>();
-  const [ruleForm] = Form.useForm<{ prefixRules: string; manualShortNames: string }>();
+  const [taskSourceAccountUserId, setTaskSourceAccountUserId] = useState("");
+  const [prefixRulesText, setPrefixRulesText] = useState("");
+  const [manualShortNamesText, setManualShortNamesText] = useState("{}");
 
   const loadCatalog = async () => {
     const response = await fetchTaskCatalog();
     setCatalog(response);
-    sourceForm.setFieldValue("taskSourceAccountUserId", response.source_account_user_id);
+    setTaskSourceAccountUserId(response.source_account_user_id);
   };
 
   const loadProductionDashboard = async () => {
@@ -409,10 +406,8 @@ export function TasksPage() {
   const loadRules = async () => {
     const response = await fetchTaskRules();
     setRules(response);
-    ruleForm.setFieldsValue({
-      prefixRules: response.prefix_rules.join("\n"),
-      manualShortNames: JSON.stringify(response.manual_short_names, null, 2),
-    });
+    setPrefixRulesText(response.prefix_rules.join("\n"));
+    setManualShortNamesText(JSON.stringify(response.manual_short_names, null, 2));
   };
 
   useEffect(() => {
@@ -436,19 +431,24 @@ export function TasksPage() {
       setNoSubmitResult(null);
       const nextDetail = await fetchTaskDetail(record.id);
       setDetail(nextDetail);
+      const processPlanResponse = await fetchTaskOperationProcessPlan(record.id).catch(() => null);
+      setOperationProcessPlan(processPlanResponse);
+      if (!(record.capability_available || record.capability_recording_count > 0)) {
+        setCapability(null);
+        setQuestionContext(null);
+        setDrawerOpen(true);
+        return;
+      }
       try {
-        const [capabilityResponse, contextResponse, processPlanResponse] = await Promise.all([
+        const [capabilityResponse, contextResponse] = await Promise.all([
           fetchTaskCapability(record.id),
           fetchTaskHttpQuestionContext(record.id),
-          fetchTaskOperationProcessPlan(record.id),
         ]);
         setCapability(capabilityResponse);
         setQuestionContext(contextResponse);
-        setOperationProcessPlan(processPlanResponse);
       } catch {
         setCapability(null);
         setQuestionContext(null);
-        setOperationProcessPlan(null);
       }
       setDrawerOpen(true);
     } finally {
@@ -906,21 +906,21 @@ export function TasksPage() {
     }
   };
 
-  const handleSourceSubmit = async (values: { taskSourceAccountUserId: string }) => {
-    const result = await updateTaskSourceAccount(values.taskSourceAccountUserId);
+  const handleSourceSubmit = async () => {
+    const result = await updateTaskSourceAccount(taskSourceAccountUserId);
     message.success(result.message);
     await loadCatalog();
   };
 
-  const handleRuleSubmit = async (values: { prefixRules: string; manualShortNames: string }) => {
+  const handleRuleSubmit = async () => {
     let manualShortNames: Record<string, string> = {};
     try {
-      manualShortNames = values.manualShortNames.trim() ? JSON.parse(values.manualShortNames) : {};
+      manualShortNames = manualShortNamesText.trim() ? JSON.parse(manualShortNamesText) : {};
     } catch {
       message.error("单任务手动简称必须是 JSON 对象");
       return;
     }
-    const prefixRules = values.prefixRules.split("\n").map((item) => item.trim()).filter(Boolean);
+    const prefixRules = prefixRulesText.split("\n").map((item) => item.trim()).filter(Boolean);
     const response = await updateTaskRules({ prefix_rules: prefixRules, manual_short_names: manualShortNames });
     setRules(response);
     message.success("简称规则已保存，刷新任务目录后生效");
@@ -1035,7 +1035,7 @@ export function TasksPage() {
       return;
     }
     setProductionForm(defaultProductionForm());
-    setProductionMaxMode("unlimited");
+    setProductionMaxMode("limited");
     setProductionLoading(true);
     await openDetail(queue.catalog_item);
     try {
@@ -1056,32 +1056,6 @@ export function TasksPage() {
 
   const updateProductionForm = (patch: Partial<StartProductionPayload>) => {
     setProductionForm((current) => ({ ...current, ...patch }));
-  };
-
-  const startProductionRun = async () => {
-    const taskId = detail?.item.task_id || selectedTaskQueue?.task_id;
-    if (!taskId) {
-      message.warning("当前任务缺少 TaskID，不能启动生产。");
-      return;
-    }
-    setProductionLoading(true);
-    try {
-      const payload: StartProductionPayload = {
-        ...productionForm,
-        limits: {
-          ...productionForm.limits,
-          max_items_total: productionMaxMode === "unlimited" ? null : productionForm.limits.max_items_total,
-        },
-      };
-      const result = await startTaskProduction(taskId, payload);
-      setAutoRun(result);
-      message.success("生产已启动");
-      await loadTaskWorkbench();
-    } catch (error: unknown) {
-      message.error(error instanceof Error ? error.message : "启动生产失败");
-    } finally {
-      setProductionLoading(false);
-    }
   };
 
   const pauseProductionRun = async () => {
@@ -1126,12 +1100,29 @@ export function TasksPage() {
     }
   };
 
+  const openAccountWindow = async (account: ProductionAccountCard, target: "task" | "personal") => {
+    const popup = window.open("about:blank", "_blank");
+    if (popup) popup.opener = null;
+    try {
+      const result = await openAccountTarget(account.user_id, target);
+      if (popup) {
+        popup.location.replace(result.open_url);
+      } else {
+        window.open(result.open_url, "_blank", "noopener,noreferrer");
+      }
+      message.success(result.message);
+    } catch (error: unknown) {
+      popup?.close();
+      message.error(error instanceof Error ? error.message : "打开账号窗口失败");
+    }
+  };
+
   const openAccountTaskPage = (account: ProductionAccountCard) => {
-    window.open(account.task_open_url || account.task_page_url, "_blank", "noopener,noreferrer");
+    void openAccountWindow(account, "task");
   };
 
   const openAccountPersonalCenter = (account: ProductionAccountCard) => {
-    window.open(account.personal_open_url || account.personal_center_url, "_blank", "noopener,noreferrer");
+    void openAccountWindow(account, "personal");
   };
 
   const refreshAutoRun = async (runId = autoRun?.run_id) => {
@@ -1165,44 +1156,6 @@ export function TasksPage() {
       }
     } catch (error: unknown) {
       message.error(error instanceof Error ? error.message : "启动前自检失败");
-    } finally {
-      setAutoRunLoading(false);
-    }
-  };
-
-  const startAutoTaskRun = async () => {
-    if (!autoAbilityReady) {
-      message.warning("该任务还没有发布可执行能力，先去 AI 标注能力工作台完成制作和验证。");
-      return;
-    }
-    const selectedRunnable = selectedAutoAccountIds.filter((userId) => runnableTaskAccountIds.includes(userId));
-    if (!selectedRunnable.length) {
-      message.warning(isBon8Task ? "当前没有可直接进入 bon8 自动做题的账号。bon8 这轮只处理已领取的处理中/返修题。" : "当前无可自动领题账号，已阻止启动自动做题。请刷新到 ReceiveEnable=true 且任务页链接正确的账号后再启动。");
-      return;
-    }
-    const taskId = detail?.item.task_id || selectedTaskQueue?.task_id;
-    if (!taskId) {
-      message.warning("当前任务缺少 TaskID，不能启动自动做题。");
-      return;
-    }
-    setAutoRunLoading(true);
-    try {
-      const result = await startTaskAutoRun({
-        account_user_ids: selectedRunnable,
-        task_id: taskId,
-        node_id: "1",
-        ability_version: detailAbilityDraft?.version ?? (isBon8Task ? "bon8-built-in" : ""),
-        write_audit: true,
-      });
-      setAutoRun(result);
-      const worker = await startTaskAutoRunWorker(result.run_id);
-      setAutoRunWorkerStatus(worker);
-      const refreshed = await fetchTaskAutoRun(result.run_id).catch(() => result);
-      setAutoRun(refreshed);
-      message.success("AI 自动做题已启动，并已触发首个执行 tick");
-      await loadTaskWorkbench();
-    } catch (error: unknown) {
-      message.error(error instanceof Error ? error.message : "AI 自动做题启动失败");
     } finally {
       setAutoRunLoading(false);
     }
@@ -1256,38 +1209,14 @@ export function TasksPage() {
     ui_review_hint: result.ui_review_hint,
   });
 
-  const buildBon8NoSubmitResult = (run: Bon8ProductionRunResponse): UnifiedNoSubmitResult => {
-    const sheet = run.confirmation_sheet;
-    const tempResult = (sheet?.temp_save_result ?? {}) as Record<string, unknown>;
-    const verifyResult = (sheet?.verify_submit_result ?? {}) as Record<string, unknown>;
-    const tempStatusCode = Number(tempResult.baseRespStatusCode ?? tempResult.base_resp_status_code ?? -1);
-    return {
-      task_kind: "bon8",
-      stage: run.status,
-      review_status: String(sheet?.status ?? run.gate_status ?? ""),
-      account_user_id: String(sheet?.account_user_id ?? run.seed_account_id ?? previewAccountUserId),
-      item_id: String(sheet?.item_id ?? ""),
-      sends_network: true,
-      writes_remote: true,
-      submits_remote: false,
-      saved_to_task_ui: tempStatusCode === 0,
-      answer_preview: {
-        ai_scores: sheet?.ai_scores ?? {},
-        reasons: sheet?.reasons ?? {},
-        model_order: sheet?.model_order ?? [],
-      },
-      temp_result: tempResult,
-      verify_result: verifyResult,
-      review_artifact_path: String(sheet?.evidence_path ?? sheet?.review_payload_path ?? ""),
-      message: run.message,
-      ui_review_hint: "请打开真实 bon8 做题页面核对评分、勾选和理由；如需继续首题审核和正式启动，请在高级区处理。",
-    };
-  };
-
   const handleTaskEndToEndNoSubmit = async () => {
     const taskId = detail?.item.task_id || selectedTaskQueue?.task_id;
     if (!taskId) {
       message.warning("当前任务缺少 TaskID，不能执行端到端做题不提交。");
+      return;
+    }
+    if (isBon8Task) {
+      message.warning("bon8 旧任务页不再执行端到端不提交，请进入能力工作台 Step3 审核流程。");
       return;
     }
     if (!previewAccountUserId) {
@@ -1296,66 +1225,17 @@ export function TasksPage() {
     }
     setNoSubmitLoading(true);
     try {
-      if (isBon8Task) {
-        if (autoRun?.adapter_key === "bon8" && autoRun.status === "running_auto") {
-          throw new Error("当前 bon8 自动做题正在运行；请先停止后再做端到端不提交预览。");
-        }
-        const started = await startTaskAutoRun({
-          account_user_ids: [previewAccountUserId],
-          task_id: taskId,
-          node_id: "1",
-          ability_version: "bon8-built-in",
-          write_audit: false,
-        });
-        const prepared = await prepareBon8FirstItemReviewWithAi(started.adapter_run_id);
-        setNoSubmitResult(buildBon8NoSubmitResult(prepared));
-        const refreshed = await fetchTaskAutoRun(started.run_id).catch(() => started);
-        setAutoRun(refreshed);
-        message.success("bon8 端到端做题不提交已生成，请核对评分、勾选和理由。");
-      } else {
-        if (!detailAbilityDraft) {
-          throw new Error("当前任务还没有题型能力草稿，不能执行端到端做题不提交。");
-        }
-        const result = await runTaskAbilityRealNoSubmit(detailAbilityDraft.id, {
-          account_user_id: previewAccountUserId,
-          use_system_ai_for_vision: false,
-        });
-        setNoSubmitResult(buildAbilityNoSubmitResult(result));
-        message.success(result.saved_to_task_ui ? "端到端做题不提交已保存到真实做题界面，请核对结果。" : result.message);
+      if (!detailAbilityDraft) {
+        throw new Error("当前任务还没有题型能力草稿，不能执行端到端做题不提交。");
       }
+      const result = await runTaskAbilityRealNoSubmit(detailAbilityDraft.id, {
+        account_user_id: previewAccountUserId,
+        use_system_ai_for_vision: false,
+      });
+      setNoSubmitResult(buildAbilityNoSubmitResult(result));
+      message.success(result.saved_to_task_ui ? "端到端做题不提交已保存到真实做题界面，请核对结果。" : result.message);
     } catch (error: unknown) {
       message.error(error instanceof Error ? error.message : "端到端做题不提交执行失败");
-    } finally {
-      setNoSubmitLoading(false);
-    }
-  };
-
-  const handleBon8ApproveFirstReview = async () => {
-    if (!autoRun?.run_id || autoRun.adapter_key !== "bon8" || !bon8AdvancedRun?.confirmation_sheet?.confirmation_id) return;
-    setNoSubmitLoading(true);
-    try {
-      await approveBon8ProductionRun(autoRun.adapter_run_id, bon8AdvancedRun.confirmation_sheet.confirmation_id);
-      const refreshed = await fetchTaskAutoRun(autoRun.run_id);
-      setAutoRun(refreshed);
-      message.success("bon8 首题审核已批准。");
-    } catch (error: unknown) {
-      message.error(error instanceof Error ? error.message : "bon8 首题审核批准失败");
-    } finally {
-      setNoSubmitLoading(false);
-    }
-  };
-
-  const handleBon8SubmitFirstReview = async () => {
-    if (!autoRun?.run_id || autoRun.adapter_key !== "bon8") return;
-    setNoSubmitLoading(true);
-    try {
-      await submitBon8FirstItem(autoRun.adapter_run_id);
-      const refreshed = await fetchTaskAutoRun(autoRun.run_id);
-      setAutoRun(refreshed);
-      setAutoRunWorkerStatus(await fetchTaskAutoRunWorkerStatus(autoRun.run_id).catch(() => null));
-      message.success("bon8 首题已正式提交，并可继续进入自动做题。");
-    } catch (error: unknown) {
-      message.error(error instanceof Error ? error.message : "bon8 首题正式提交失败");
     } finally {
       setNoSubmitLoading(false);
     }
@@ -1616,6 +1496,7 @@ export function TasksPage() {
   const detailAbilityDraft = detail?.item.task_id ? abilityDraftByTaskId.get(detail.item.task_id) ?? null : null;
   const detailAbilityLabel = abilityFlowLabel(detailAbilityDraft, Boolean(capability));
   const autoAbilityReady = Boolean(detailAbilityDraft?.capability_enabled);
+  const drawerCanUseAnswerCapability = Boolean(detailAbilityDraft?.capability_enabled || detailAbilityDraft?.flow_stage === "real_no_submit_ready" || detailAbilityDraft?.flow_stage === "real_no_submit_review");
   const autoRunHealthy = autoRun ? autoRun.health_ok : true;
   const autoRunWaitingForItems = autoAbilityReady && runnableTaskAccountIds.length === 0;
   const blockedAutoReceiveSummary = blockedAutoReceiveRows.map((row) => `${row.account.custom_name || row.account.display_name || row.account.user_id}：${taskAutoReceiveReason(row)}`).join("；");
@@ -1704,7 +1585,7 @@ export function TasksPage() {
   } else if (detailAbilityDraft) {
     taskWorkbenchNextStep = "能力草稿待审核，请先到 AI 标注能力工作台查看草稿并确认。";
   } else if (!capability) {
-    taskWorkbenchNextStep = "先在 AI 标注能力工作台提交规则材料；录制能力只作为字段学习来源。";
+    taskWorkbenchNextStep = "先去题型能力库制作能力；录制能力只作为字段学习来源。";
   } else if (draftResult?.ok) {
     taskWorkbenchNextStep = "已有草稿结果，先核对最近结果；需要写入时再进入高级调试确认闸门。";
   } else if (questionContext?.ok) {
@@ -1796,7 +1677,7 @@ export function TasksPage() {
             type={queueExecutableReady(selectedTaskQueue) ? "success" : "warning"}
             showIcon
             message={queueExecutableReady(selectedTaskQueue) ? "该任务已进入有做题能力" : selectedTaskAbilityDraft ? abilityFlowLabel(selectedTaskAbilityDraft, Boolean(selectedTaskQueue?.catalog_item?.capability_available)).text : "该任务还未进入题型能力流程"}
-            description={queueExecutableReady(selectedTaskQueue) ? "可进入生产控制查看执行材料；正式提交仍需高风险确认。" : selectedTaskAbilityDraft ? "请到 AI 标注能力工作台继续下一步：草稿确认、真实题不提交或审核通过。" : "先在 AI 标注能力工作台提交规则材料，生成草稿并完成真实题不提交审核。"}
+            description={queueExecutableReady(selectedTaskQueue) ? "可进入生产控制查看执行材料；正式提交仍需高风险确认。" : selectedTaskAbilityDraft ? "请到题型能力库继续下一步：草稿确认、真实题不提交或审核通过。" : "先去题型能力库制作能力，生成草稿并完成真实题不提交审核。"}
           />
           <Descriptions bordered size="small" column={3}>
             <Descriptions.Item label="选中任务">{selectedTaskQueue?.task_name ?? "-"}</Descriptions.Item>
@@ -1810,10 +1691,10 @@ export function TasksPage() {
             <Descriptions.Item label="录制能力">{selectedTaskQueue?.catalog_item?.capability_available ? `有录制 ${selectedTaskQueue.catalog_item.capability_recording_count} 份` : "无录制能力"}</Descriptions.Item>
           </Descriptions>
           <Space wrap>
-            <Button type="primary" disabled={!canOpenTaskOperation(selectedTaskQueue)} onClick={() => void openTaskCapabilityDetail()}>打开生产控制</Button>
+            <Button type="primary" disabled={!canOpenTaskOperation(selectedTaskQueue)} onClick={() => void openTaskCapabilityDetail()}>打开任务操作台</Button>
             <Button disabled={!selectedTaskQueue?.accounts.length} onClick={() => selectedTaskQueue?.accounts[0] && openAccountTaskPage(selectedTaskQueue.accounts[0].account)}>打开任务页</Button>
-            <Button href="/ai">启动 AI 生产</Button>
-            <Button href="/ability-workbench">进入能力工作台</Button>
+            <Button href="/ai">AI 配置/模型健康</Button>
+            <Button href="/rules">去题型能力库制作</Button>
           </Space>
         </Space>
       </Card>
@@ -1824,33 +1705,28 @@ export function TasksPage() {
 
       <Card title="目录治理">
         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-          <Form form={sourceForm} layout="inline" onFinish={(values) => void handleSourceSubmit(values)}>
-            <Form.Item label="来源账号" name="taskSourceAccountUserId" rules={[{ required: true, message: "请输入来源账号" }]}>
-              <Input style={{ width: 260 }} />
-            </Form.Item>
-            <Form.Item>
-              <Button htmlType="submit">保存来源账号</Button>
-            </Form.Item>
-          </Form>
-          <Form form={ruleForm} layout="vertical" onFinish={(values) => void handleRuleSubmit(values)}>
-            <Form.Item label="自动去除前缀（每行一个）" name="prefixRules">
-              <Input.TextArea rows={3} placeholder="RFT人标_" />
-            </Form.Item>
-            <Form.Item label="单任务手动简称 JSON（任务ID -> 简称）" name="manualShortNames">
-              <Input.TextArea rows={3} placeholder='{"7634***9806":"美观度"}' />
-            </Form.Item>
+          <Space wrap align="center">
+            <Typography.Text>来源账号</Typography.Text>
+            <Input style={{ width: 260 }} value={taskSourceAccountUserId} onChange={(event) => setTaskSourceAccountUserId(event.target.value)} />
+            <Button onClick={() => void handleSourceSubmit()}>保存来源账号</Button>
+          </Space>
+          <Space direction="vertical" style={{ width: "100%" }}>
+            <Typography.Text>自动去除前缀（每行一个）</Typography.Text>
+            <Input.TextArea rows={3} placeholder="RFT人标_" value={prefixRulesText} onChange={(event) => setPrefixRulesText(event.target.value)} />
+            <Typography.Text>单任务手动简称 JSON（任务ID 到 简称）</Typography.Text>
+            <Input.TextArea rows={3} placeholder='{"7634***9806":"美观度"}' value={manualShortNamesText} onChange={(event) => setManualShortNamesText(event.target.value)} />
             <Space>
-              <Button htmlType="submit">保存规则</Button>
+              <Button onClick={() => void handleRuleSubmit()}>保存规则</Button>
               <Typography.Text type="secondary">当前前缀 {rules?.prefix_rules.length ?? 0} 条，手动简称 {Object.keys(rules?.manual_short_names ?? {}).length} 条</Typography.Text>
             </Space>
-          </Form>
+          </Space>
         </Space>
       </Card>
 
-      <Drawer title="生产控制" width={560} open={drawerOpen} onClose={() => setDrawerOpen(false)}>
+      <Drawer title="任务操作台" width={560} open={drawerOpen} onClose={() => setDrawerOpen(false)}>
         {detail ? (
           <div className="page-stack">
-            <Card title="生产控制" size="small">
+            <Card title="任务操作台" size="small">
               <Space direction="vertical" size="middle" style={{ width: "100%" }}>
                 <Alert
                   type={autoAbilityReady ? "success" : "warning"}
@@ -1863,10 +1739,12 @@ export function TasksPage() {
                   <Descriptions.Item label="状态"><Tag color={statusColorMap[detail.item.task_status_color]}>{detail.item.task_status_raw}</Tag></Descriptions.Item>
                   <Descriptions.Item label="待处理">{detail.item.last_task_page_error ? "未验证" : (detail.item.pending_raw || "0")}</Descriptions.Item>
                   <Descriptions.Item label="题型能力">{detailAbilityDraft ? `${detailAbilityDraft.status} / ${detailAbilityDraft.version}` : "未提交规则材料"}</Descriptions.Item>
-                  <Descriptions.Item label="录制能力">{capability ? capability.capability_level : "待学习"}</Descriptions.Item>
+                  <Descriptions.Item label="录制能力" span={2}>{capability ? capability.capability_level : "待学习"}</Descriptions.Item>
                   <Descriptions.Item label="推荐下一步" span={2}>{taskWorkbenchNextStep}</Descriptions.Item>
                   <Descriptions.Item label="最近结果" span={2}>{taskWorkbenchRecentResult}</Descriptions.Item>
                 </Descriptions>
+                {drawerCanUseAnswerCapability ? (
+                  <>
                 <Card size="small" title="生产资格">
                   <Space direction="vertical" size="middle" style={{ width: "100%" }}>
                     <Descriptions bordered size="small" column={2}>
@@ -1950,7 +1828,7 @@ export function TasksPage() {
                         style={{ width: "100%" }}
                         value={productionMaxMode}
                         onChange={setProductionMaxMode}
-                        options={[{ value: "unlimited", label: "无限" }, { value: "limited", label: "指定数量" }]}
+                        options={[{ value: "limited", label: "指定数量" }]}
                       />
                       {productionMaxMode === "limited" ? (
                         <InputNumber min={1} style={{ width: "100%" }} value={productionForm.limits.max_items_total ?? 1} onChange={(value) => updateProductionForm({ limits: { ...productionForm.limits, max_items_total: Number(value ?? 1) } })} />
@@ -1958,15 +1836,18 @@ export function TasksPage() {
                     </Space>
                     <Space direction="vertical" style={{ width: "100%" }}>
                       <Typography.Text strong>连续失败</Typography.Text>
-                      <InputNumber min={1} style={{ width: "100%" }} value={productionForm.limits.failure_threshold} addonAfter="次后暂停" onChange={(value) => updateProductionForm({ limits: { ...productionForm.limits, failure_threshold: Number(value ?? 3) } })} />
+                      <Space.Compact style={{ width: "100%" }}>
+                        <InputNumber min={1} style={{ width: "100%" }} value={productionForm.limits.failure_threshold} onChange={(value) => updateProductionForm({ limits: { ...productionForm.limits, failure_threshold: Number(value ?? 3) } })} />
+                        <Button disabled>次后暂停</Button>
+                      </Space.Compact>
                     </Space>
                     <Descriptions bordered size="small" column={1}>
-                      <Descriptions.Item label="生产配置摘要">{productionForm.execution_mode} / {productionForm.question_scope.mode} / {productionMaxMode === "unlimited" ? "无限" : productionForm.limits.max_items_total}</Descriptions.Item>
+                      <Descriptions.Item label="生产配置摘要">{productionForm.execution_mode} / {productionForm.question_scope.mode} / {productionForm.limits.max_items_total}</Descriptions.Item>
                       <Descriptions.Item label="当前执行设备/账号">{autoRun?.accounts.map((item) => item.account_user_id).join("、") || "未启动"}</Descriptions.Item>
                       <Descriptions.Item label="最近错误">{autoRun?.last_error || "无"}</Descriptions.Item>
                     </Descriptions>
                     <Space wrap>
-                      <Button type="primary" loading={productionLoading} disabled={productionStatus?.production_allowed === false} onClick={() => void startProductionRun()}>启动生产</Button>
+                      <Button type="primary" href={`/ability-workbench${detail?.item.task_id ? `?task_id=${detail.item.task_id}` : ""}`}>去能力工作台启动生产</Button>
                       <Button disabled={!autoRun?.run_id || autoRun.status === "paused"} loading={productionLoading} onClick={() => void pauseProductionRun()}>暂停生产</Button>
                       <Button disabled={!autoRun?.run_id || autoRun.status !== "paused"} loading={productionLoading} onClick={() => void resumeProductionRun()}>恢复生产</Button>
                       <Button danger disabled={!autoRun?.run_id || autoRun.status === "stopped"} loading={productionLoading} onClick={() => void stopProductionRun()}>停止生产</Button>
@@ -1982,7 +1863,7 @@ export function TasksPage() {
                       type="info"
                       showIcon
                       message="统一预览入口"
-                      description={isBon8Task ? "bon8 在这里执行 1 道真实题的 AI 做题不提交，结果会下沉到 bon8 首题审核高级区；本轮只处理已领取的处理中/返修题。" : "科研图在这里直接执行真实题不提交，把 AI 答案保存到做题界面供你核对；不正式提交。"}
+                      description={isBon8Task ? "bon8 旧任务页不再执行真实题预览、首题审核或正式提交；请统一到能力工作台 Step3/Step4 处理。" : "科研图在这里直接执行真实题不提交，把 AI 答案保存到做题界面供你核对；不正式提交。"}
                     />
                     <Descriptions bordered size="small" column={2}>
                       <Descriptions.Item label="预览账号">{previewAccountLabel}</Descriptions.Item>
@@ -2002,11 +1883,17 @@ export function TasksPage() {
                       }))}
                     />
                     <Space wrap>
-                      <Button type="primary" loading={noSubmitLoading} disabled={!previewAccountUserId} onClick={() => void handleTaskEndToEndNoSubmit()}>
-                        {noSubmitResult ? "重新执行端到端做题不提交" : "端到端做题不提交"}
-                      </Button>
+                      {isBon8Task ? (
+                        <Button type="primary" href={`/ability-workbench${detail.item.task_id ? `?task_id=${detail.item.task_id}` : ""}`}>
+                          进入能力工作台
+                        </Button>
+                      ) : (
+                        <Button type="primary" loading={noSubmitLoading} disabled={!previewAccountUserId} onClick={() => void handleTaskEndToEndNoSubmit()}>
+                          {noSubmitResult ? "重新执行端到端做题不提交" : "端到端做题不提交"}
+                        </Button>
+                      )}
                       <Typography.Text type="secondary">
-                        {isBon8Task ? "先看 bon8 评分、勾选和理由是否合理，再决定是否继续首题审核。" : "先看 AI 写入结果是否合理，再决定是否继续调整提示词或启用能力。"}
+                        {isBon8Task ? "旧任务页只保留状态查看；调教、审核和生产启动统一走能力工作台。" : "先看 AI 写入结果是否合理，再决定是否继续调整提示词或启用能力。"}
                       </Typography.Text>
                     </Space>
                     {noSubmitResult ? (
@@ -2033,10 +1920,10 @@ export function TasksPage() {
                       type={autoAbilityReady ? "success" : "warning"}
                       showIcon
                       message={autoAbilityReady ? (isBon8Task ? "该任务已接入 bon8 通用自动做题" : "该任务已发布 AI 做题能力") : "该任务还没有可执行能力"}
-                      description={autoAbilityReady ? (isBon8Task ? "当前复用生产控制执行 bon8 已领取的处理中/返修题；pending-only 账号不在本轮范围内。" : "默认启动当前任务所有可用、当前有题且满足自动循环资格的账号；已有处理中题的账号可直接继续做题，pending-only 账号则仍需平台允许自动领题。") : "先到 AI 标注能力工作台制作、验证并发布能力后，才允许自动做题。"}
+                      description={autoAbilityReady ? (isBon8Task ? "当前复用生产控制执行 bon8 已领取的处理中/返修题；pending-only 账号不在本轮范围内。" : "默认启动当前任务所有可用、当前有题且满足自动循环资格的账号；已有处理中题的账号可直接继续做题，pending-only 账号则仍需平台允许自动领题。") : "先去题型能力库制作能力、验证并发布后，才允许自动做题。"}
                     />
                     {!autoAbilityReady ? (
-                      <Button type="primary" href="/ability-workbench">去能力工作台制作</Button>
+                      <Button type="primary" href="/rules">去题型能力库制作</Button>
                     ) : (
                       <>
                         {autoRunWaitingForItems ? (
@@ -2059,7 +1946,7 @@ export function TasksPage() {
                           <Typography.Text strong>执行账号</Typography.Text>
                           <Tag color="blue">只展示有此任务的账号</Tag>
                           <Tag color="orange">仅满足自动循环资格的账号可入循环</Tag>
-                          <Button size="small" disabled={!runnableTaskAccountIds.length} onClick={() => setSelectedAutoAccountIds(runnableTaskAccountIds)}>选择当前可自动运行账号</Button>
+                          <Button size="small" disabled={!runnableTaskAccountIds.length} onClick={() => setSelectedAutoAccountIds(runnableTaskAccountIds)}>选择当前有题账号</Button>
                           <Button size="small" onClick={() => setSelectedAutoAccountIds([])}>清空</Button>
                         </Space>
                         <Select
@@ -2084,7 +1971,7 @@ export function TasksPage() {
                         />
                         <Space wrap>
                           <Button loading={autoRunLoading} onClick={() => void runAutoTaskPreflight()}>启动前自检</Button>
-                          <Button type="primary" loading={autoRunLoading} disabled={!selectedAutoAccountIds.length} onClick={() => void startAutoTaskRun()}>启动自动做题</Button>
+                          <Button type="primary" href={`/ability-workbench${selectedTaskQueue?.task_id ? `?task_id=${selectedTaskQueue.task_id}` : ""}`}>进入能力工作台</Button>
                           {autoRun?.run_id ? <Button loading={autoRunLoading} onClick={() => void refreshAutoRun()}>刷新运行状态</Button> : null}
                           {autoRun?.run_id && !autoRunWorkerStatus?.active ? <Button loading={autoRunLoading} onClick={() => void startAutoTaskWorker()}>启动后台循环</Button> : null}
                           {autoRun?.run_id ? <Button danger loading={autoRunLoading} onClick={() => void stopAutoTaskRun()}>立即停止</Button> : null}
@@ -2166,6 +2053,51 @@ export function TasksPage() {
                   <Button href="/ability-workbench">进入能力工作台</Button>
                 </Space>
                 <Typography.Text type="secondary">默认操作不会提交答案；写远端、暂存和提交前校验仍在高级调试里受闸门控制。</Typography.Text>
+                  </>
+                ) : (
+                  <Card size="small" title="只读 operation 流程计划">
+                    <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+                      <Alert
+                        type="info"
+                        showIcon
+                        message="该任务还没有可执行做题能力"
+                        description="当前操作台只展示任务处理流程，不提供生产参数、端到端写入或自动做题入口。请先去题型能力库制作能力。"
+                      />
+                      {operationProcessPlan ? (
+                        <>
+                          <Descriptions bordered column={1} size="small">
+                            <Descriptions.Item label="入口">
+                              <Typography.Link href={operationProcessPlan.operation_url} target="_blank" rel="noreferrer">
+                                {operationProcessPlan.operation_url}
+                              </Typography.Link>
+                            </Descriptions.Item>
+                            <Descriptions.Item label="来源账号">{operationProcessPlan.source_account_user_id}</Descriptions.Item>
+                            <Descriptions.Item label="任务">{operationProcessPlan.task_type_name} / {operationProcessPlan.task_id}</Descriptions.Item>
+                            <Descriptions.Item label="领题/触网/写远端/提交">
+                              {operationProcessPlan.claims_task ? "是" : "否"} / {operationProcessPlan.sends_network ? "是" : "否"} / {operationProcessPlan.writes_remote ? "是" : "否"} / {operationProcessPlan.submits_answer ? "是" : "否"}
+                            </Descriptions.Item>
+                            <Descriptions.Item label="处理后读题">{operationProcessPlan.post_claim_read_step}</Descriptions.Item>
+                            <Descriptions.Item label="答案写入">{operationProcessPlan.answer_write_step}</Descriptions.Item>
+                            <Descriptions.Item label="护栏">{operationProcessPlan.guardrails.join("；")}</Descriptions.Item>
+                          </Descriptions>
+                          <Table
+                            size="small"
+                            columns={decisionPipelineColumns}
+                            dataSource={operationProcessPlan.steps}
+                            rowKey={(record) => record.key}
+                            pagination={false}
+                          />
+                        </>
+                      ) : (
+                        <Alert type="warning" showIcon message="暂未读取到 operation 流程计划" description="请刷新任务数据后重试，或直接进入题型能力库提交规则材料。" />
+                      )}
+                      <Space wrap>
+                        <Button type="primary" href={`/rules${detail.item.task_id ? `?task_id=${detail.item.task_id}` : ""}`}>去题型能力库制作</Button>
+                        <Button disabled={!selectedTaskQueue?.accounts.length} onClick={() => selectedTaskQueue?.accounts[0] && openAccountTaskPage(selectedTaskQueue.accounts[0].account)}>打开任务页</Button>
+                      </Space>
+                    </Space>
+                  </Card>
+                )}
               </Space>
             </Card>
             <Collapse
@@ -2190,8 +2122,8 @@ export function TasksPage() {
                   <Alert
                     type="info"
                     showIcon
-                    message="bon8 专属首题审核已下沉到高级区"
-                    description="主操作区统一使用“端到端做题不提交”先看结果；如果确认 bon8 首题结果无误，再在这里继续批准或正式提交。"
+                    message="bon8 专属首题审核已改为只读状态"
+                    description="旧任务页不再提供批准首题或正式提交入口；如需继续调教、审核或启动生产，请统一进入能力工作台。"
                   />
                   <Descriptions bordered size="small" column={2}>
                     <Descriptions.Item label="run 状态">{bon8AdvancedRun.status}</Descriptions.Item>
@@ -2203,11 +2135,8 @@ export function TasksPage() {
                     <Descriptions.Item label="下一步" span={2}>{bon8AdvancedRun.next_step}</Descriptions.Item>
                   </Descriptions>
                   <Space wrap>
-                    <Button loading={noSubmitLoading} disabled={bon8AdvancedRun.status !== "waiting_first_confirm" || !bon8AdvancedRun.confirmation_sheet.confirmation_id} onClick={() => void handleBon8ApproveFirstReview()}>
-                      批准首题审核
-                    </Button>
-                    <Button type="primary" loading={noSubmitLoading} disabled={bon8AdvancedRun.status !== "waiting_first_submit"} onClick={() => void handleBon8SubmitFirstReview()}>
-                      正式提交首题并进入自动做题
+                    <Button type="primary" href={`/ability-workbench${detail.item.task_id ? `?task_id=${detail.item.task_id}` : ""}`}>
+                      去能力工作台继续审核
                     </Button>
                   </Space>
                 </Space>
@@ -2807,7 +2736,7 @@ export function TasksPage() {
                   ) : null}
                 </Space>
               ) : (
-                <Alert type="info" showIcon message="该任务还没有可用能力卡" description="先用评分插件上传完整学习包，平台会从录制包学习字段映射和草稿暂存接口。" />
+                <Alert type="info" showIcon message="该任务还没有可用能力卡" description="先去题型能力库制作能力；录制学习包只作为字段学习来源，不能替代 Step3/Step4 闸门。" />
               )}
             </Card>
                     </div>

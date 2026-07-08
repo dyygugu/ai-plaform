@@ -52,12 +52,14 @@ class Bon8RunWorkerScheduler:
             self.status.last_finished_at = _now_text()
             self.status.next_run_at = _future_text(self.interval_seconds)
 
-    def start(self) -> Bon8RunWorkerStatus:
+    def start(self, *, run_immediately: bool = True) -> Bon8RunWorkerStatus:
         if self._task is not None:
             return self.snapshot()
         self.status.active = True
         self._stop_event = asyncio.Event()
-        self._task = asyncio.create_task(self._loop())
+        self._task = asyncio.create_task(self._loop(run_immediately=run_immediately))
+        if not run_immediately:
+            self.status.next_run_at = _future_text(self.interval_seconds)
         return self.snapshot()
 
     async def stop(self) -> Bon8RunWorkerStatus:
@@ -75,10 +77,14 @@ class Bon8RunWorkerScheduler:
     def snapshot(self) -> Bon8RunWorkerStatus:
         return replace(self.status)
 
-    async def _loop(self) -> None:
+    async def _loop(self, *, run_immediately: bool) -> None:
         while self._stop_event is not None and not self._stop_event.is_set():
+            if not run_immediately:
+                await self._wait(self.interval_seconds)
+                if self._stop_event is None or self._stop_event.is_set():
+                    break
             await self.run_once()
-            await self._wait(self.interval_seconds)
+            run_immediately = False
 
     async def _wait(self, seconds: int) -> None:
         if self._stop_event is None:
@@ -106,9 +112,9 @@ class Bon8RunWorkerRegistry:
             self._workers[str(run_id)] = worker
         return worker
 
-    def start(self, run_id: str, *, interval_seconds: int = 5) -> Bon8RunWorkerStatus:
+    def start(self, run_id: str, *, interval_seconds: int = 5, run_immediately: bool = True) -> Bon8RunWorkerStatus:
         worker = self.ensure(str(run_id), interval_seconds=interval_seconds)
-        return worker.start()
+        return worker.start(run_immediately=run_immediately)
 
     def status(self, run_id: str) -> Bon8RunWorkerStatus:
         worker = self._workers.get(str(run_id))

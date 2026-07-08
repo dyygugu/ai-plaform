@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from app.core.settings import get_settings
 from app.schemas.delivery import DeliveryArtifact, DeliveryBundleResponse, DeliveryChecklistItem, DeliveryChecklistResponse, DeliverySummaryResponse
+from app.services.api_paths import api_path
 from app.services.alerting_service import build_slo_summary
 from app.services.observability_service import build_collector_guard
 from app.services.ops_job_service import build_release_gate
@@ -100,21 +101,21 @@ def build_delivery_checklist(db: Session) -> DeliveryChecklistResponse:
             title="发布门禁",
             status="passed" if release_ready else "failed",
             description="必需门禁通过，可进入人工域名切换前检查。" if release_ready else f"失败门禁：{', '.join(required_failed)}",
-            evidence_path="/api/v1/ops/release-gate",
+            evidence_path=api_path("/ops/release-gate", settings),
         ),
         DeliveryChecklistItem(
             key="collector_guard",
             title="采集守护",
             status=collector.status,
             description=collector.message,
-            evidence_path="/api/v1/observability/collector-guard",
+            evidence_path=api_path("/observability/collector-guard", settings),
         ),
         DeliveryChecklistItem(
             key="slo_alerting",
             title="SLO 告警闭环",
             status=slo.overall_status,
             description="告警中心只生成本地预览和审计证据，外部发送关闭。",
-            evidence_path="/api/v1/alerts/slo",
+            evidence_path=api_path("/alerts/slo", settings),
         ),
         DeliveryChecklistItem(
             key="screenshots",
@@ -128,7 +129,7 @@ def build_delivery_checklist(db: Session) -> DeliveryChecklistResponse:
             title="正式域名手动切换",
             status="manual",
             description="系统不自动修改 manage.51gugu.uk；最终由用户手动改反代并保留回滚配置。",
-            evidence_path="/api/v1/ops/domain-switch-runbook",
+            evidence_path=api_path("/ops/domain-switch-runbook", settings),
         ),
     ]
     risk_notes = [

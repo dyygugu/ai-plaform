@@ -23,6 +23,7 @@ from app.schemas.task_auto_runs import TaskAutoRunStartRequest
 from app.services.task_auto_run_service import (
     RESEARCH_CHART_TASK_ID,
     RESEARCH_CHART_TASK_IDS,
+    TaskAutoRun3dRubricAdapter,
     TaskAutoRunAdapterSnapshot,
     TaskAutoRunBon8Adapter,
     TaskAutoRunResearchChartAdapter,
@@ -31,6 +32,8 @@ from app.services.task_auto_run_service import (
     start_task_auto_run,
     stop_task_auto_run,
 )
+from app.services.task_ability_service import build_task_ability_run_context
+from app.services.task_ability_service import record_task_ability_run
 from app.services.task_rules import utc_now
 
 
@@ -81,6 +84,7 @@ def _write_research_chart_ability_store(
     version: str = "ability-test-research-chart",
     task_id: str = RESEARCH_CHART_TASK_ID,
     task_name: str = "RFT科研图表还原-正式(随机5000题)",
+    field_mapping: dict | None = None,
 ) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     review = {
@@ -98,9 +102,108 @@ def _write_research_chart_ability_store(
                         "status": "有做题能力" if enabled else "待审核真实不提交结果",
                         "task_name": task_name,
                         "task_id": task_id,
+                        "specific_rules": "严格对比",
+                        "sample_data": "样例",
+                        "related_content": "",
+                        "system_ai_draft": "草稿",
+                        "field_mapping": field_mapping or {},
                         "flow_stage": "capability_enabled" if enabled else "real_no_submit_review",
                         "capability_enabled": enabled,
                         "real_no_submit_review": review,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _read_first_ability_draft(path: Path) -> dict:
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    items = payload.get("items", []) if isinstance(payload, dict) else []
+    if not items or not isinstance(items[0], dict):
+        raise AssertionError("ability store missing draft")
+    return items[0]
+
+
+def _write_allowed_research_chart_live_report(path: Path) -> None:
+    draft = _read_first_ability_draft(path)
+    task_id = str(draft.get("task_id") or RESEARCH_CHART_TASK_ID)
+    context = build_task_ability_run_context(draft)
+    review_root = path.parent / f"research-chart-{task_id}" / "real-no-submit-reviews"
+    review_root.mkdir(parents=True, exist_ok=True)
+    (review_root / "live-allow.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "draft_id": context["draft_id"],
+                "task_id": task_id,
+                "prompt": {"fingerprint": context["prompt_fingerprint"]},
+                "saved_to_task_ui": True,
+                "submits_remote": False,
+                "review_status": "待人工审核",
+                "question_context": {"item_id": "item-allow"},
+                "ai_decision": {
+                    "rubric_items": [
+                        {
+                            "rubric_id": "R1",
+                            "verdict": "满足",
+                            "reason": "主体结构与参考一致，未发现明显缺失。",
+                        }
+                    ]
+                },
+                "created_at": "2026-05-16T00:00:00+00:00",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _record_completed_research_chart_trial(path: Path) -> None:
+    task_id = str(_read_first_ability_draft(path).get("task_id") or RESEARCH_CHART_TASK_ID)
+    record_task_ability_run(
+        task_id,
+        "trial",
+        {
+            "run_id": "task-auto-trial-pass",
+            "status": "completed",
+            "selected_account_count": 1,
+            "healthy_account_count": 1,
+            "abnormal_account_count": 0,
+            "health_ok": True,
+            "generated_at": "2026-05-16T01:30:00+00:00",
+        },
+        store_path=path,
+    )
+
+
+def _write_3d_rubric_ability_store(
+    path: Path,
+    *,
+    enabled: bool = True,
+    task_id: str = "7658232870117527347",
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "draft-3d-1",
+                        "version": "ability-test-3d",
+                        "status": "有做题能力" if enabled else "待审核真实不提交结果",
+                        "task_name": "Blender_3D 人标支持-0703",
+                        "task_id": task_id,
+                        "task_type": "3d_rubric_eval",
+                        "ability_source": "assistant_authored",
+                        "flow_stage": "capability_enabled" if enabled else "real_no_submit_review",
+                        "capability_enabled": enabled,
+                        "real_no_submit_review": {
+                            "review_status": "人工已通过" if enabled else "待人工审核",
+                            "saved_to_task_ui": enabled,
+                        },
                     }
                 ]
             },
@@ -158,6 +261,50 @@ class TaskAutoRunServiceTests(unittest.TestCase):
 
     def test_research_chart_task_id_set_includes_full_dataset_task(self) -> None:
         self.assertIn("7639402643386830630", RESEARCH_CHART_TASK_IDS)
+
+    def test_3d_rubric_adapter_supports_enabled_task_type_without_hardcoded_task_id(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = Path(temp_dir) / "task-abilities" / "ability-drafts.json"
+            _write_3d_rubric_ability_store(store, task_id="7658232870117527347")
+            adapter = TaskAutoRun3dRubricAdapter(ability_store_path=store, account_loader=_account_loader)
+
+            self.assertTrue(adapter.supports_task("7658232870117527347"))
+            self.assertFalse(adapter.supports_task("unknown-task"))
+
+    def test_3d_rubric_preflight_requires_enabled_ability_account_and_verified_writer(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = Path(temp_dir) / "task-abilities" / "ability-drafts.json"
+            _write_3d_rubric_ability_store(store, enabled=False)
+            adapter = TaskAutoRun3dRubricAdapter(ability_store_path=store, account_loader=_account_loader)
+
+            blocked = adapter.preflight(TaskAutoRunStartRequest(task_id="7658232870117527347", node_id="1", account_user_ids=["account-1"]))
+
+            self.assertFalse(blocked.can_start)
+            self.assertEqual(blocked.adapter_key, "3d_rubric")
+            self.assertIn("真实题不提交审核", blocked.next_step)
+
+            _write_3d_rubric_ability_store(store, enabled=True)
+            writer_blocked = adapter.preflight(TaskAutoRunStartRequest(task_id="7658232870117527347", node_id="1", account_user_ids=["account-1"]))
+
+            self.assertFalse(writer_blocked.can_start)
+            self.assertEqual(writer_blocked.runnable_account_count, 0)
+            self.assertTrue(any(check.key == "remote_writer" and check.status == "blocked" for check in writer_blocked.checks))
+            self.assertIn("暂存字段", writer_blocked.next_step)
+
+    def test_3d_rubric_tick_fails_closed_until_remote_writer_exists(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = Path(temp_dir) / "task-abilities" / "ability-drafts.json"
+            state_dir = Path(temp_dir) / "state"
+            _write_3d_rubric_ability_store(store, enabled=True)
+            adapter = TaskAutoRun3dRubricAdapter(ability_store_path=store, state_dir=state_dir, account_loader=_account_loader)
+
+            snapshot = adapter.start(db, TaskAutoRunStartRequest(task_id="7658232870117527347", node_id="1", account_user_ids=["account-1"]))
+            ticked = adapter.tick(snapshot.adapter_run_id)
+
+            self.assertEqual(ticked.status, "blocked")
+            self.assertIn("暂存字段", ticked.last_error)
+            self.assertFalse(ticked.accounts[0].healthy)
 
     def test_start_bon8_creates_generic_run_and_persists_adapter_mapping(self) -> None:
         db = _session()
@@ -436,6 +583,7 @@ class TaskAutoRunServiceTests(unittest.TestCase):
             self.assertEqual(checks["ability_published"].status, "passed")
             self.assertEqual(checks["account_cookie"].status, "passed")
             self.assertEqual(checks["evidence_storage"].status, "passed")
+            self.assertFalse((root / "evidence").exists())
 
     def test_research_chart_adapter_supports_full_dataset_task_id(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -529,14 +677,16 @@ class TaskAutoRunServiceTests(unittest.TestCase):
 
             self.assertTrue(result.can_start)
             self.assertEqual(result.status, "ready")
-            self.assertTrue((root / "evidence").exists())
+            self.assertFalse((root / "evidence").exists())
 
-    def test_research_chart_adapter_runs_one_temp_save_tick_without_formal_submit(self) -> None:
+    def test_research_chart_adapter_blocks_tick_without_temp_payload_for_formal_submit(self) -> None:
         db = _session()
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             ability_store = root / "task-abilities" / "ability-drafts.json"
             _write_research_chart_ability_store(ability_store, enabled=True)
+            _write_allowed_research_chart_live_report(ability_store)
+            _record_completed_research_chart_trial(ability_store)
             ability_calls = []
 
             def fake_ability_runner(draft_id: str, **kwargs):
@@ -567,6 +717,7 @@ class TaskAutoRunServiceTests(unittest.TestCase):
                     task_id=RESEARCH_CHART_TASK_ID,
                     node_id="1",
                     account_user_ids=["account-sample-002"],
+                    run_config={"ability_run_mode": "production"},
                 ),
                 adapters=[adapter],
                 state_dir=root / "generic-runs",
@@ -575,15 +726,216 @@ class TaskAutoRunServiceTests(unittest.TestCase):
             self.assertEqual(result.status, "running_auto")
             ticked = adapter.tick(result.adapter_run_id)
 
-            self.assertEqual(ticked.status, "running_auto")
-            self.assertEqual(ticked.accounts[0].status, "temp_saved_waiting_submit")
+            self.assertEqual(ticked.status, "blocked")
+            self.assertEqual(ticked.accounts[0].status, "isolated_failed")
             self.assertEqual(ticked.accounts[0].current_item_id, "live-item-1")
-            self.assertTrue(ticked.accounts[0].healthy)
-            self.assertIn("未正式提交", ticked.message)
+            self.assertFalse(ticked.accounts[0].healthy)
+            self.assertIn("暂存 payload 缺少 AuditAnswers", ticked.accounts[0].last_error)
             self.assertEqual(ability_calls[0]["draft_id"], "research-draft-1")
             self.assertEqual(ability_calls[0]["kwargs"]["target_account_user_id"], "account-sample-002")
             self.assertTrue(ability_calls[0]["kwargs"]["allow_temp_save"])
             self.assertFalse(ability_calls[0]["kwargs"]["use_system_ai_for_vision"])
+        db.close()
+
+    def test_research_chart_tick_blocks_formal_submit_when_temp_save_not_verified(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ability_store = root / "task-abilities" / "ability-drafts.json"
+            _write_research_chart_ability_store(ability_store, enabled=True)
+            _write_allowed_research_chart_live_report(ability_store)
+            _record_completed_research_chart_trial(ability_store)
+            transport_calls: list[dict] = []
+
+            def fake_ability_runner(draft_id: str, **kwargs):
+                return {
+                    "ok": True,
+                    "task_id": RESEARCH_CHART_TASK_ID,
+                    "stage": "端到端做题不提交：待人工审核",
+                    "saved_to_task_ui": False,
+                    "writes_remote": True,
+                    "submits_remote": False,
+                    "question_context": {"item_id": "live-item-unsafe", "source_mode": "live_search_item_category"},
+                    "saved_answer": {"data.label_sorce.model_image": "0", "data.label_remark.model_image": "两图差异明显"},
+                    "ai_decision": {"score": "0", "reason": "两图差异明显", "confidence": "high"},
+                    "temp_draft_result": {"ok": True, "base_resp_status_code": None},
+                    "temp_draft_payload": {
+                        "TaskID": RESEARCH_CHART_TASK_ID,
+                        "NodeID": "1",
+                        "AuditAnswers": [{"ItemID": "live-item-unsafe", "Content": "{}", "ControlData": "{}"}],
+                    },
+                }
+
+            def fake_transport(*args, **kwargs):
+                transport_calls.append({"args": args, "kwargs": kwargs})
+                raise AssertionError("formal submit gate must not call verify/submit when temp save is not verified")
+
+            adapter = TaskAutoRunResearchChartAdapter(
+                ability_store_path=ability_store,
+                review_root=root / "reviews",
+                state_dir=root / "research-runs",
+                ability_runner=fake_ability_runner,
+                account_loader=_account_loader,
+                transport=fake_transport,
+            )
+            result = start_task_auto_run(
+                db,
+                TaskAutoRunStartRequest(
+                    task_id=RESEARCH_CHART_TASK_ID,
+                    node_id="1",
+                    account_user_ids=["account-sample-002"],
+                    run_config={"ability_run_mode": "production"},
+                ),
+                adapters=[adapter],
+                state_dir=root / "generic-runs",
+            )
+
+            ticked = adapter.tick(result.adapter_run_id)
+
+            self.assertEqual(transport_calls, [])
+            self.assertEqual(ticked.status, "blocked")
+            self.assertEqual(ticked.accounts[0].status, "isolated_failed")
+            self.assertIn("暂存未验证成功", ticked.accounts[0].last_error)
+        db.close()
+
+    def test_research_chart_trial_run_blocks_when_temp_save_not_verified(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ability_store = root / "task-abilities" / "ability-drafts.json"
+            _write_research_chart_ability_store(ability_store, enabled=True)
+
+            def fake_ability_runner(_draft_id: str, **_kwargs):
+                return {
+                    "ok": True,
+                    "task_id": RESEARCH_CHART_TASK_ID,
+                    "saved_to_task_ui": False,
+                    "writes_remote": True,
+                    "submits_remote": False,
+                    "question_context": {"item_id": "trial-temp-save-failed", "source_mode": "live_search_item_category"},
+                    "temp_draft_result": {"ok": True, "base_resp_status_code": None},
+                    "temp_draft_payload": {
+                        "TaskID": RESEARCH_CHART_TASK_ID,
+                        "NodeID": "1",
+                        "AuditAnswers": [{"ItemID": "trial-temp-save-failed", "Content": "{}"}],
+                    },
+                }
+
+            adapter = TaskAutoRunResearchChartAdapter(
+                ability_store_path=ability_store,
+                review_root=root / "reviews",
+                state_dir=root / "research-runs",
+                ability_runner=fake_ability_runner,
+                account_loader=_account_loader,
+            )
+            result = start_task_auto_run(
+                db,
+                TaskAutoRunStartRequest(
+                    task_id=RESEARCH_CHART_TASK_ID,
+                    node_id="1",
+                    account_user_ids=["account-sample-002"],
+                    run_config={"ability_run_mode": "trial"},
+                ),
+                adapters=[adapter],
+                state_dir=root / "generic-runs",
+            )
+
+            ticked = adapter.tick(result.adapter_run_id)
+
+            self.assertEqual(ticked.status, "blocked")
+            self.assertEqual(ticked.accounts[0].status, "isolated_failed")
+            self.assertIn("暂存未验证成功", ticked.accounts[0].last_error)
+        db.close()
+
+    def test_research_chart_tick_blocks_when_temp_payload_has_no_audit_answers(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ability_store = root / "task-abilities" / "ability-drafts.json"
+            _write_research_chart_ability_store(ability_store, enabled=True)
+            _write_allowed_research_chart_live_report(ability_store)
+            _record_completed_research_chart_trial(ability_store)
+
+            def fake_ability_runner(draft_id: str, **kwargs):
+                return {
+                    "ok": True,
+                    "task_id": RESEARCH_CHART_TASK_ID,
+                    "stage": "端到端做题不提交：已暂存待人工审核",
+                    "saved_to_task_ui": True,
+                    "writes_remote": True,
+                    "submits_remote": False,
+                    "question_context": {"item_id": "live-item-empty-payload", "source_mode": "live_search_item_category"},
+                    "saved_answer": {"data.label_sorce.model_image": "0", "data.label_remark.model_image": "两图差异明显"},
+                    "ai_decision": {"score": "0", "reason": "两图差异明显", "confidence": "high"},
+                    "temp_draft_result": {"ok": True, "base_resp_status_code": 0},
+                    "temp_draft_payload": {"TaskID": RESEARCH_CHART_TASK_ID, "NodeID": "1", "AuditAnswers": []},
+                }
+
+            adapter = TaskAutoRunResearchChartAdapter(
+                ability_store_path=ability_store,
+                review_root=root / "reviews",
+                state_dir=root / "research-runs",
+                ability_runner=fake_ability_runner,
+                account_loader=_account_loader,
+            )
+            result = start_task_auto_run(
+                db,
+                TaskAutoRunStartRequest(
+                    task_id=RESEARCH_CHART_TASK_ID,
+                    node_id="1",
+                    account_user_ids=["account-sample-002"],
+                    run_config={"ability_run_mode": "production"},
+                ),
+                adapters=[adapter],
+                state_dir=root / "generic-runs",
+            )
+
+            ticked = adapter.tick(result.adapter_run_id)
+
+            self.assertEqual(ticked.status, "blocked")
+            self.assertEqual(ticked.accounts[0].status, "isolated_failed")
+            self.assertIn("暂存 payload 缺少 AuditAnswers", ticked.accounts[0].last_error)
+        db.close()
+
+    def test_research_chart_tick_blocks_when_bound_ability_fingerprint_changes(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ability_store = root / "task-abilities" / "ability-drafts.json"
+            _write_research_chart_ability_store(ability_store, enabled=True, field_mapping={"score": "old"})
+            ability_calls: list[str] = []
+
+            def fake_ability_runner(draft_id: str, **_kwargs):
+                ability_calls.append(draft_id)
+                raise AssertionError("stale ability context must block before executing the ability runner")
+
+            adapter = TaskAutoRunResearchChartAdapter(
+                ability_store_path=ability_store,
+                review_root=root / "reviews",
+                state_dir=root / "research-runs",
+                ability_runner=fake_ability_runner,
+                account_loader=_account_loader,
+            )
+            result = start_task_auto_run(
+                db,
+                TaskAutoRunStartRequest(
+                    task_id=RESEARCH_CHART_TASK_ID,
+                    node_id="1",
+                    account_user_ids=["account-sample-002"],
+                ),
+                adapters=[adapter],
+                state_dir=root / "generic-runs",
+            )
+            payload = json.loads(ability_store.read_text(encoding="utf-8"))
+            payload["items"][0]["field_mapping"] = {"score": "new"}
+            ability_store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            ticked = adapter.tick(result.adapter_run_id)
+
+            self.assertEqual(ability_calls, [])
+            self.assertEqual(ticked.status, "blocked")
+            self.assertEqual(ticked.accounts[0].status, "ability_context_stale")
+            self.assertIn("能力配置已变化", ticked.last_error)
         db.close()
 
     def test_research_chart_tick_fans_out_up_to_five_accounts_concurrently(self) -> None:
@@ -655,6 +1007,86 @@ class TaskAutoRunServiceTests(unittest.TestCase):
             self.assertGreaterEqual(max_concurrent, 5)
         db.close()
 
+    def test_research_chart_tick_collects_account_results_in_completion_order(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ability_store = root / "task-abilities" / "ability-drafts.json"
+            _write_research_chart_ability_store(ability_store, enabled=True)
+            result_order: list[str] = []
+
+            class FakeFuture:
+                def __init__(self, account_user_id: str) -> None:
+                    self.account_user_id = account_user_id
+
+                def result(self) -> dict:
+                    result_order.append(self.account_user_id)
+                    return {
+                        "artifact": {
+                            "ok": True,
+                            "task_id": RESEARCH_CHART_TASK_ID,
+                            "stage": "端到端做题不提交：已暂存待人工审核",
+                            "saved_to_task_ui": True,
+                            "writes_remote": True,
+                            "submits_remote": False,
+                            "question_context": {"item_id": f"item-{self.account_user_id}", "source_mode": "live_search_item_category"},
+                            "temp_draft_payload": {},
+                        },
+                        "submit_evidence": {"attempted": False, "submits_remote": False, "item_id": f"item-{self.account_user_id}"},
+                        "item_id": f"item-{self.account_user_id}",
+                    }
+
+            class FakeExecutor:
+                def __init__(self, *args, **kwargs) -> None:
+                    self.futures: list[FakeFuture] = []
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, exc_type, exc, tb) -> bool:
+                    return False
+
+                def submit(self, _fn, _draft_id, _snapshot, account) -> FakeFuture:
+                    future = FakeFuture(str(account.account_user_id))
+                    self.futures.append(future)
+                    return future
+
+            def fake_as_completed(futures):
+                submitted = list(futures)
+                fast = next(future for future in submitted if future.account_user_id == "account-fast")
+                slow = next(future for future in submitted if future.account_user_id == "account-slow")
+                return [fast, slow]
+
+            adapter = TaskAutoRunResearchChartAdapter(
+                ability_store_path=ability_store,
+                review_root=root / "reviews",
+                state_dir=root / "research-runs",
+                account_loader=lambda user_id: {
+                    "userId": user_id,
+                    "name": f"用户{user_id[-4:]}",
+                    "cookie": "sessionid=test",
+                    "operationUrl": "https://aidp.juejin.cn/operation/task-v2?page=1",
+                    "tasks": [{"id": RESEARCH_CHART_TASK_ID, "receiveEnable": True, "frontendNotSubmitted": 1, "frontendRepairCount": 0, "poolPendingSubmit": 10}],
+                },
+            )
+            result = start_task_auto_run(
+                db,
+                TaskAutoRunStartRequest(
+                    task_id=RESEARCH_CHART_TASK_ID,
+                    node_id="1",
+                    account_user_ids=["account-slow", "account-fast"],
+                ),
+                adapters=[adapter],
+                state_dir=root / "generic-runs",
+            )
+
+            with patch("app.services.task_auto_run_service.ThreadPoolExecutor", FakeExecutor):
+                with patch("app.services.task_auto_run_service.as_completed", fake_as_completed, create=True):
+                    adapter.tick(result.adapter_run_id)
+
+            self.assertEqual(result_order[:2], ["account-fast", "account-slow"])
+        db.close()
+
     def test_research_chart_preflight_allows_pending_only_accounts_to_start_with_auto_claim(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -719,7 +1151,7 @@ class TaskAutoRunServiceTests(unittest.TestCase):
             checks = {item.key: item for item in result.checks}
             self.assertEqual(checks["auto_receive_ready"].status, "passed")
 
-    def test_research_chart_running_run_switches_to_latest_published_ability_version(self) -> None:
+    def test_research_chart_running_run_blocks_when_published_ability_version_changes(self) -> None:
         db = _session()
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -762,11 +1194,11 @@ class TaskAutoRunServiceTests(unittest.TestCase):
             ticked = adapter.tick(result.adapter_run_id)
             refreshed = get_task_auto_run(result.run_id, adapters=[adapter], state_dir=root / "generic-runs")
 
-            self.assertEqual(ability_calls[0]["draft_id"], "research-draft-v2")
-            self.assertEqual(ticked.raw_adapter_run["draft_id"], "research-draft-v2")
-            self.assertEqual(ticked.raw_adapter_run["ability_version"], "v2")
-            self.assertEqual(ticked.raw_adapter_run["previous_ability_version"], "v1")
-            self.assertEqual(refreshed.ability_version, "v2")
+            self.assertEqual(ability_calls, [])
+            self.assertEqual(ticked.status, "blocked")
+            self.assertEqual(ticked.accounts[0].status, "ability_context_stale")
+            self.assertIn("能力配置已变化", ticked.last_error)
+            self.assertEqual(refreshed.status, "blocked")
         db.close()
 
     def test_research_chart_adapter_formal_submit_gate_verifies_submits_and_readbacks(self) -> None:
@@ -775,6 +1207,8 @@ class TaskAutoRunServiceTests(unittest.TestCase):
             root = Path(temp_dir)
             ability_store = root / "task-abilities" / "ability-drafts.json"
             _write_research_chart_ability_store(ability_store, enabled=True)
+            _write_allowed_research_chart_live_report(ability_store)
+            _record_completed_research_chart_trial(ability_store)
             submit_payload = {
                 "TaskID": RESEARCH_CHART_TASK_ID,
                 "NodeID": "1",
@@ -843,6 +1277,7 @@ class TaskAutoRunServiceTests(unittest.TestCase):
                     task_id=RESEARCH_CHART_TASK_ID,
                     node_id="1",
                     account_user_ids=["account-sample-002"],
+                    run_config={"ability_run_mode": "production"},
                 ),
                 adapters=[adapter],
                 state_dir=root / "generic-runs",
@@ -877,7 +1312,7 @@ class TaskAutoRunServiceTests(unittest.TestCase):
             self.assertEqual(aggregate["items"][key]["last_item_id"], "live-submit-item")
         db.close()
 
-    def test_research_chart_adapter_does_not_submit_when_verify_gate_fails(self) -> None:
+    def test_research_chart_adapter_does_not_formal_submit_without_step4_production_mode(self) -> None:
         db = _session()
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -887,10 +1322,214 @@ class TaskAutoRunServiceTests(unittest.TestCase):
             def fake_ability_runner(_draft_id: str, **_kwargs):
                 return {
                     "ok": True,
+                    "task_id": RESEARCH_CHART_TASK_ID,
+                    "saved_to_task_ui": True,
+                    "writes_remote": True,
+                    "submits_remote": False,
+                    "question_context": {"item_id": "no-mode-item", "source_mode": "live_search_item_category"},
+                    "temp_draft_result": {"ok": True, "base_resp_status_code": 0},
+                    "temp_draft_payload": {
+                        "TaskID": RESEARCH_CHART_TASK_ID,
+                        "NodeID": "1",
+                        "AuditAnswers": [{"ItemID": "no-mode-item", "Content": "{}"}],
+                    },
+                }
+
+            remote_calls: list[str] = []
+
+            def fake_transport(_account: dict, _kind: str, path: str, _body: dict):
+                remote_calls.append(path)
+                raise AssertionError("run without Step4 production mode must not call remote submit APIs")
+
+            adapter = TaskAutoRunResearchChartAdapter(
+                ability_store_path=ability_store,
+                review_root=root / "reviews",
+                state_dir=root / "research-runs",
+                ability_runner=fake_ability_runner,
+                account_loader=_account_loader,
+                transport=fake_transport,
+            )
+            result = start_task_auto_run(
+                db,
+                TaskAutoRunStartRequest(
+                    task_id=RESEARCH_CHART_TASK_ID,
+                    node_id="1",
+                    account_user_ids=["account-sample-002"],
+                ),
+                adapters=[adapter],
+                state_dir=root / "generic-runs",
+            )
+
+            ticked = adapter.tick(result.adapter_run_id)
+
+            self.assertEqual(remote_calls, [])
+            self.assertEqual(ticked.accounts[0].status, "temp_saved_waiting_submit")
+            evidence = ticked.raw_adapter_run["account_evidence"]["account-sample-002"]
+            self.assertFalse(evidence["attempted"])
+            self.assertFalse(evidence["submits_remote"])
+        db.close()
+
+    def test_research_chart_start_blocks_when_latest_draft_is_not_enabled_even_if_old_version_is_enabled(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ability_store = root / "task-abilities" / "ability-drafts.json"
+            _write_research_chart_ability_store(ability_store, enabled=True, draft_id="old-enabled", version="v1")
+            payload = json.loads(ability_store.read_text(encoding="utf-8"))
+            latest_disabled = {
+                **payload["items"][0],
+                "id": "new-disabled",
+                "version": "v2",
+                "status": "待审核真实不提交结果",
+                "flow_stage": "real_no_submit_review",
+                "capability_enabled": False,
+                "real_no_submit_review": {"review_status": "待人工审核", "saved_to_task_ui": False},
+            }
+            payload["items"].insert(0, latest_disabled)
+            ability_store.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+
+            adapter = TaskAutoRunResearchChartAdapter(
+                ability_store_path=ability_store,
+                review_root=root / "reviews",
+                state_dir=root / "research-runs",
+                ability_runner=lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("old enabled draft must not execute")),
+                account_loader=_account_loader,
+            )
+            result = start_task_auto_run(
+                db,
+                TaskAutoRunStartRequest(
+                    task_id=RESEARCH_CHART_TASK_ID,
+                    node_id="1",
+                    account_user_ids=["account-sample-002"],
+                    run_config={"ability_run_mode": "production"},
+                ),
+                adapters=[adapter],
+                state_dir=root / "generic-runs",
+            )
+
+            self.assertEqual(result.status, "blocked")
+            self.assertEqual(result.accounts[0].status, "ability_not_enabled")
+            self.assertEqual(result.raw_adapter_run["executor_status"], "ability_not_enabled")
+        db.close()
+
+    def test_start_task_auto_run_does_not_reuse_active_run_with_different_ability_run_mode(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ability_store = root / "task-abilities" / "ability-drafts.json"
+            _write_research_chart_ability_store(ability_store, enabled=True)
+            adapter = TaskAutoRunResearchChartAdapter(
+                ability_store_path=ability_store,
+                review_root=root / "reviews",
+                state_dir=root / "research-runs",
+                account_loader=_account_loader,
+            )
+            start_task_auto_run(
+                db,
+                TaskAutoRunStartRequest(
+                    task_id=RESEARCH_CHART_TASK_ID,
+                    node_id="1",
+                    account_user_ids=["account-sample-002"],
+                ),
+                adapters=[adapter],
+                state_dir=root / "generic-runs",
+            )
+
+            with self.assertRaisesRegex(ValueError, "运行模式"):
+                start_task_auto_run(
+                    db,
+                    TaskAutoRunStartRequest(
+                        task_id=RESEARCH_CHART_TASK_ID,
+                        node_id="1",
+                        account_user_ids=["account-sample-002"],
+                        run_config={"ability_run_mode": "production"},
+                    ),
+                    adapters=[adapter],
+                    state_dir=root / "generic-runs",
+                )
+        db.close()
+
+    def test_research_chart_adapter_enforces_production_submit_limit_per_account(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ability_store = root / "task-abilities" / "ability-drafts.json"
+            _write_research_chart_ability_store(ability_store, enabled=True)
+            _write_allowed_research_chart_live_report(ability_store)
+            _record_completed_research_chart_trial(ability_store)
+
+            def fake_ability_runner(_draft_id: str, **_kwargs):
+                return {
+                    "ok": True,
+                    "task_id": RESEARCH_CHART_TASK_ID,
+                    "saved_to_task_ui": True,
+                    "writes_remote": True,
+                    "submits_remote": False,
+                    "question_context": {"item_id": "limited-item", "source_mode": "live_search_item_category"},
+                    "temp_draft_result": {"ok": True, "base_resp_status_code": 0},
+                    "temp_draft_payload": {
+                        "TaskID": RESEARCH_CHART_TASK_ID,
+                        "NodeID": "1",
+                        "AuditAnswers": [{"ItemID": "limited-item", "Content": "{}"}],
+                    },
+                }
+
+            remote_calls: list[str] = []
+
+            def fake_transport(_account: dict, _kind: str, path: str, _body: dict):
+                remote_calls.append(path)
+                if path == "/dispatcher/verify/submit":
+                    return {"statusCode": 200, "elapsedMs": 1, "body": {"BaseResp": {"StatusCode": 0}}}
+                if path == "/api/dispatch/SubmitItemAndReceive":
+                    return {"statusCode": 200, "elapsedMs": 1, "body": {"BaseResp": {"StatusCode": 0}, "SubmitItemResponse": {"BaseResp": {"StatusCode": 0}}, "ReceiveResponse": {"BaseResp": {"StatusCode": 0}, "Items": []}}}
+                raise AssertionError(f"unexpected remote path: {path}")
+
+            adapter = TaskAutoRunResearchChartAdapter(
+                ability_store_path=ability_store,
+                review_root=root / "reviews",
+                state_dir=root / "research-runs",
+                ability_runner=fake_ability_runner,
+                account_loader=_account_loader,
+                transport=fake_transport,
+            )
+            result = start_task_auto_run(
+                db,
+                TaskAutoRunStartRequest(
+                    task_id=RESEARCH_CHART_TASK_ID,
+                    node_id="1",
+                    account_user_ids=["account-sample-002"],
+                    run_config={"ability_run_mode": "production", "production_max_items_per_account": 1},
+                ),
+                adapters=[adapter],
+                state_dir=root / "generic-runs",
+            )
+
+            first = adapter.tick(result.adapter_run_id)
+            second = adapter.tick(result.adapter_run_id)
+
+            self.assertTrue(first.raw_adapter_run["account_evidence"]["account-sample-002"]["success"])
+            self.assertEqual(remote_calls, ["/dispatcher/verify/submit", "/api/dispatch/SubmitItemAndReceive"])
+            self.assertFalse(second.raw_adapter_run["account_evidence"]["account-sample-002"]["attempted"])
+            self.assertTrue(second.raw_adapter_run["account_evidence"]["account-sample-002"]["limit_reached"])
+        db.close()
+
+    def test_research_chart_adapter_does_not_submit_when_verify_gate_fails(self) -> None:
+        db = _session()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            ability_store = root / "task-abilities" / "ability-drafts.json"
+            _write_research_chart_ability_store(ability_store, enabled=True)
+            _write_allowed_research_chart_live_report(ability_store)
+            _record_completed_research_chart_trial(ability_store)
+
+            def fake_ability_runner(_draft_id: str, **_kwargs):
+                return {
+                    "ok": True,
                     "saved_to_task_ui": True,
                     "writes_remote": True,
                     "submits_remote": False,
                     "question_context": {"item_id": "verify-fail-item", "source_mode": "live_search_item_category"},
+                    "temp_draft_result": {"ok": True, "base_resp_status_code": 0},
                     "temp_draft_payload": {
                         "TaskID": RESEARCH_CHART_TASK_ID,
                         "NodeID": "1",
@@ -920,6 +1559,7 @@ class TaskAutoRunServiceTests(unittest.TestCase):
                     task_id=RESEARCH_CHART_TASK_ID,
                     node_id="1",
                     account_user_ids=["account-sample-002"],
+                    run_config={"ability_run_mode": "production"},
                 ),
                 adapters=[adapter],
                 state_dir=root / "generic-runs",
@@ -1101,6 +1741,7 @@ class TaskAutoRunServiceTests(unittest.TestCase):
                 fetched = client.get(f"/api/v1/task-auto-runs/runs/{run_id}")
                 self.assertEqual(fetched.json()["accounts"][0]["status"], "temp_saved_waiting_submit")
                 self.assertEqual(fetched.json()["accounts"][0]["current_item_id"], "live-route-item")
+                self.assertEqual(fetched.json()["accounts"][0]["last_error"], "")
                 self.assertEqual(len(tick_calls), 1)
                 worker_status = client.get(f"/api/v1/task-auto-runs/runs/{run_id}/worker/status")
                 self.assertEqual(worker_status.status_code, 200, worker_status.text)

@@ -17,7 +17,97 @@ from app.services.task_ability_service import (
     run_task_ability_dry_run,
     run_task_ability_real_no_submit,
     update_task_ability_draft,
+    _prompt_fingerprint,
+    _temp_save_succeeded,
 )
+
+
+def _write_recorded_temp_payload(store: Path, *, task_id: str = "7638992213846740763") -> None:
+    payload_dir = store.parent / f"research-chart-{task_id}"
+    payload_dir.mkdir(parents=True, exist_ok=True)
+    content = {
+        "item": {
+            "uid": "recorded-uid",
+            "image_gt": "https://example.com/recorded-gt.png",
+            "model_image": "https://example.com/recorded-model.png",
+            "model_image1": "https://example.com/recorded-model1.png",
+            "model_image1_bon_id": 2,
+            "model_image2": "https://example.com/recorded-model2.png",
+            "model_image2_bon_id": 3,
+        },
+        "type": "neeko",
+        "data": {
+            "discard": "No",
+            "discard_type": [],
+            "discard_remark": None,
+            "checkRemark": None,
+            "label_sorce": {"model_image": "0", "model_image1": "0", "model_image2": "0"},
+            "label_remark": {"model_image": "recorded", "model_image1": "recorded", "model_image2": "recorded"},
+        },
+        "dataMap": {"checkRemark": None, "discard": "No", "discard_type": [], "discard_remark": None, "label_sorce": {}, "label_remark": {}},
+        "itemID": "recorded-item",
+        "isAbandoned": False,
+    }
+    payload = {
+        "AuditAnswers": [
+            {
+                "ItemID": "recorded-item",
+                "Content": json.dumps(content, ensure_ascii=False, separators=(",", ":")),
+                "ControlData": json.dumps({"Discard": False, "extraAnswer": []}, ensure_ascii=False, separators=(",", ":")),
+            }
+        ],
+        "NodeID": "1",
+        "StagingTime": "604800",
+        "TaskID": task_id,
+    }
+    (payload_dir / "research-chart-dry-run-payload.json").write_text(
+        json.dumps(
+            {
+                "payload": payload,
+                "temp_save_verification": {
+                    "base_resp_status_code": 0,
+                    "saved_to_task_ui": True,
+                    "submits_remote": False,
+                },
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def _write_allowed_live_report(store: Path, *, task_id: str = "7638992213846740763", draft_id: str = "draft-1") -> None:
+    store_payload = json.loads(store.read_text(encoding="utf-8"))
+    drafts = store_payload.get("items", []) if isinstance(store_payload, dict) else []
+    draft = next((item for item in drafts if isinstance(item, dict) and item.get("id") == draft_id), {})
+    review_root = store.parent / f"research-chart-{task_id}" / "real-no-submit-reviews"
+    review_root.mkdir(parents=True, exist_ok=True)
+    (review_root / "live-ok.json").write_text(
+        json.dumps(
+            {
+                "ok": True,
+                "draft_id": draft_id,
+                "task_id": task_id,
+                "prompt": {"fingerprint": _prompt_fingerprint(draft)},
+                "saved_to_task_ui": True,
+                "submits_remote": False,
+                "review_status": "待人工审核",
+                "question_context": {"item_id": "item-1"},
+                "ai_decision": {"score": "0", "reason": "两图存在明显差异，文字和点位都不一致。", "confidence": "high"},
+                "created_at": "2026-05-16T00:00:00+00:00",
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_temp_save_succeeded_requires_explicit_base_resp_zero() -> None:
+    assert _temp_save_succeeded({"ok": True, "status_code": 200, "base_resp_status_code": 0}) is True
+    assert _temp_save_succeeded({"ok": True, "status_code": 200, "base_resp_status_code": "0"}) is True
+    assert _temp_save_succeeded({"ok": True, "status_code": 200, "base_resp_status_code": None}) is False
+    assert _temp_save_succeeded({"ok": True, "status_code": 200}) is False
+    assert _temp_save_succeeded({"ok": True, "status_code": 200, "base_resp_status_code": -1}) is False
 
 
 def test_run_task_ability_real_no_submit_creates_human_review_without_remote_submit(tmp_path: Path) -> None:
@@ -83,6 +173,503 @@ def test_run_task_ability_real_no_submit_creates_human_review_without_remote_sub
     assert Path(result["review_artifact_path"]).exists()
 
 
+def test_run_task_ability_real_no_submit_refuses_temp_save_without_recorded_payload(tmp_path: Path) -> None:
+    store = tmp_path / "task-abilities" / "ability-drafts.json"
+    review_root = tmp_path / "task-abilities" / "reviews"
+    store.parent.mkdir(parents=True)
+    store.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "draft-1",
+                        "version": "ability-test",
+                        "status": "草稿已确认",
+                        "task_name": "RFT科研图表还原-正式(随机5000题)",
+                        "task_id": "7638992213846740763",
+                        "specific_rules": "严格对比",
+                        "sample_data": "样例",
+                        "related_content": "",
+                        "system_ai_draft": "只输出 score/reason/confidence",
+                        "system_ai_trace_id": "",
+                        "provider_status": "local",
+                        "next_step": "执行真实题不提交",
+                        "created_at": "2026-05-13T00:00:00+00:00",
+                        "updated_at": "2026-05-13T00:00:00+00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict] = []
+
+    def fake_temp_save(payload: dict, account: dict) -> dict:
+        calls.append({"payload": payload, "account": account})
+        return {"ok": True, "status_code": 200, "base_resp_status_code": 0}
+
+    with pytest.raises(TaskAbilityFlowError, match="录制验证的暂存 payload"):
+        run_task_ability_real_no_submit(
+            "draft-1",
+            store_path=store,
+            review_root=review_root,
+            queue_snapshot={
+                "task_id": "7638992213846740763",
+                "pending": 0,
+                "processing": 1,
+                "repair": 0,
+                "account_user_id": "account-1",
+                "account_name": "用户1",
+            },
+            question_context={
+                "source_mode": "test-live-category-item",
+                "item_id": "item-1",
+                "uid": "chart-a.png",
+                "image_gt": "https://example.com/gt.png",
+                "model_image": "https://example.com/model.png",
+                "current_answer_data": {"discard": "No"},
+            },
+            ai_decision={"score": "0", "reason": "文字和点位存在明显偏差", "confidence": "medium"},
+            allow_temp_save=True,
+            temp_save_executor=fake_temp_save,
+        )
+
+    assert calls == []
+
+
+def test_run_task_ability_real_no_submit_refuses_malformed_recorded_payload(tmp_path: Path) -> None:
+    store = tmp_path / "task-abilities" / "ability-drafts.json"
+    review_root = tmp_path / "task-abilities" / "reviews"
+    store.parent.mkdir(parents=True)
+    store.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "draft-1",
+                        "version": "ability-test",
+                        "status": "草稿已确认",
+                        "task_name": "RFT科研图表还原-正式(随机5000题)",
+                        "task_id": "7638992213846740763",
+                        "specific_rules": "严格对比",
+                        "sample_data": "样例",
+                        "related_content": "",
+                        "system_ai_draft": "只输出 score/reason/confidence",
+                        "system_ai_trace_id": "",
+                        "provider_status": "local",
+                        "next_step": "执行真实题不提交",
+                        "created_at": "2026-05-13T00:00:00+00:00",
+                        "updated_at": "2026-05-13T00:00:00+00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    payload_dir = store.parent / "research-chart-7638992213846740763"
+    payload_dir.mkdir(parents=True, exist_ok=True)
+    (payload_dir / "research-chart-dry-run-payload.json").write_text(
+        json.dumps(
+            {
+                "payload": {"TaskID": "7638992213846740763", "NodeID": "1"},
+                "temp_save_verification": {"base_resp_status_code": 0, "saved_to_task_ui": True, "submits_remote": False},
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    calls: list[dict] = []
+
+    def fake_temp_save(payload: dict, account: dict) -> dict:
+        calls.append({"payload": payload, "account": account})
+        return {"ok": True, "status_code": 200, "base_resp_status_code": 0}
+
+    with pytest.raises(TaskAbilityFlowError, match="录制暂存 payload 缺少 AuditAnswers"):
+        run_task_ability_real_no_submit(
+            "draft-1",
+            store_path=store,
+            review_root=review_root,
+            queue_snapshot={
+                "task_id": "7638992213846740763",
+                "pending": 0,
+                "processing": 1,
+                "repair": 0,
+                "account_user_id": "account-1",
+                "account_name": "用户1",
+            },
+            question_context={
+                "source_mode": "test-live-category-item",
+                "item_id": "item-1",
+                "uid": "chart-a.png",
+                "image_gt": "https://example.com/gt.png",
+                "model_image": "https://example.com/model.png",
+            },
+            ai_decision={"score": "0", "reason": "文字和点位存在明显偏差", "confidence": "medium"},
+            allow_temp_save=True,
+            temp_save_executor=fake_temp_save,
+        )
+
+    assert calls == []
+
+
+def test_run_task_ability_real_no_submit_refuses_unverified_recorded_payload(tmp_path: Path) -> None:
+    store = tmp_path / "task-abilities" / "ability-drafts.json"
+    review_root = tmp_path / "task-abilities" / "reviews"
+    store.parent.mkdir(parents=True)
+    store.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "draft-1",
+                        "version": "ability-test",
+                        "status": "草稿已确认",
+                        "task_name": "RFT科研图表还原-正式(随机5000题)",
+                        "task_id": "7638992213846740763",
+                        "specific_rules": "严格对比",
+                        "sample_data": "样例",
+                        "related_content": "",
+                        "system_ai_draft": "只输出 score/reason/confidence",
+                        "system_ai_trace_id": "",
+                        "provider_status": "local",
+                        "next_step": "执行真实题不提交",
+                        "created_at": "2026-05-13T00:00:00+00:00",
+                        "updated_at": "2026-05-13T00:00:00+00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_recorded_temp_payload(store)
+    dry_run_path = store.parent / "research-chart-7638992213846740763" / "research-chart-dry-run-payload.json"
+    data = json.loads(dry_run_path.read_text(encoding="utf-8"))
+    data.pop("temp_save_verification", None)
+    dry_run_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    calls: list[dict] = []
+
+    def fake_temp_save(payload: dict, account: dict) -> dict:
+        calls.append({"payload": payload, "account": account})
+        return {"ok": True, "status_code": 200, "base_resp_status_code": 0}
+
+    with pytest.raises(TaskAbilityFlowError, match="显式 temp_save_verification"):
+        run_task_ability_real_no_submit(
+            "draft-1",
+            store_path=store,
+            review_root=review_root,
+            queue_snapshot={
+                "task_id": "7638992213846740763",
+                "pending": 0,
+                "processing": 1,
+                "repair": 0,
+                "account_user_id": "account-1",
+                "account_name": "用户1",
+            },
+            question_context={
+                "source_mode": "test-live-category-item",
+                "item_id": "item-1",
+                "uid": "chart-a.png",
+                "image_gt": "https://example.com/gt.png",
+                "model_image": "https://example.com/model.png",
+            },
+            ai_decision={"score": "0", "reason": "文字和点位存在明显偏差", "confidence": "medium"},
+            allow_temp_save=True,
+            temp_save_executor=fake_temp_save,
+        )
+
+    assert calls == []
+
+
+def test_run_task_ability_real_no_submit_refuses_recorded_payload_without_json_content(tmp_path: Path) -> None:
+    store = tmp_path / "task-abilities" / "ability-drafts.json"
+    review_root = tmp_path / "task-abilities" / "reviews"
+    store.parent.mkdir(parents=True)
+    store.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "draft-1",
+                        "version": "ability-test",
+                        "status": "草稿已确认",
+                        "task_name": "RFT科研图表还原-正式(随机5000题)",
+                        "task_id": "7638992213846740763",
+                        "specific_rules": "严格对比",
+                        "sample_data": "样例",
+                        "related_content": "",
+                        "system_ai_draft": "只输出 score/reason/confidence",
+                        "system_ai_trace_id": "",
+                        "provider_status": "local",
+                        "next_step": "执行真实题不提交",
+                        "created_at": "2026-05-13T00:00:00+00:00",
+                        "updated_at": "2026-05-13T00:00:00+00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_recorded_temp_payload(store)
+    dry_run_path = store.parent / "research-chart-7638992213846740763" / "research-chart-dry-run-payload.json"
+    data = json.loads(dry_run_path.read_text(encoding="utf-8"))
+    data["payload"]["AuditAnswers"][0]["Content"] = "not-json"
+    dry_run_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    calls: list[dict] = []
+
+    def fake_temp_save(payload: dict, account: dict) -> dict:
+        calls.append({"payload": payload, "account": account})
+        return {"ok": True, "status_code": 200, "base_resp_status_code": 0}
+
+    with pytest.raises(TaskAbilityFlowError, match="Content 不是合法 JSON 对象"):
+        run_task_ability_real_no_submit(
+            "draft-1",
+            store_path=store,
+            review_root=review_root,
+            queue_snapshot={
+                "task_id": "7638992213846740763",
+                "pending": 0,
+                "processing": 1,
+                "repair": 0,
+                "account_user_id": "account-1",
+                "account_name": "用户1",
+            },
+            question_context={
+                "source_mode": "test-live-category-item",
+                "item_id": "item-1",
+                "uid": "chart-a.png",
+                "image_gt": "https://example.com/gt.png",
+                "model_image": "https://example.com/model.png",
+            },
+            ai_decision={"score": "0", "reason": "文字和点位存在明显偏差", "confidence": "medium"},
+            allow_temp_save=True,
+            temp_save_executor=fake_temp_save,
+        )
+
+    assert calls == []
+
+
+def test_run_task_ability_real_no_submit_refuses_recorded_payload_with_empty_content_shape(tmp_path: Path) -> None:
+    store = tmp_path / "task-abilities" / "ability-drafts.json"
+    review_root = tmp_path / "task-abilities" / "reviews"
+    store.parent.mkdir(parents=True)
+    store.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "draft-1",
+                        "version": "ability-test",
+                        "status": "草稿已确认",
+                        "task_name": "RFT科研图表还原-正式(随机5000题)",
+                        "task_id": "7638992213846740763",
+                        "specific_rules": "严格对比",
+                        "sample_data": "样例",
+                        "related_content": "",
+                        "system_ai_draft": "只输出 score/reason/confidence",
+                        "system_ai_trace_id": "",
+                        "provider_status": "local",
+                        "next_step": "执行真实题不提交",
+                        "created_at": "2026-05-13T00:00:00+00:00",
+                        "updated_at": "2026-05-13T00:00:00+00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_recorded_temp_payload(store)
+    dry_run_path = store.parent / "research-chart-7638992213846740763" / "research-chart-dry-run-payload.json"
+    data = json.loads(dry_run_path.read_text(encoding="utf-8"))
+    data["payload"]["AuditAnswers"][0]["Content"] = "{}"
+    dry_run_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    calls: list[dict] = []
+
+    def fake_temp_save(payload: dict, account: dict) -> dict:
+        calls.append({"payload": payload, "account": account})
+        return {"ok": True, "status_code": 200, "base_resp_status_code": 0}
+
+    with pytest.raises(TaskAbilityFlowError, match="Content 缺少已录制字段结构"):
+        run_task_ability_real_no_submit(
+            "draft-1",
+            store_path=store,
+            review_root=review_root,
+            queue_snapshot={
+                "task_id": "7638992213846740763",
+                "pending": 0,
+                "processing": 1,
+                "repair": 0,
+                "account_user_id": "account-1",
+                "account_name": "用户1",
+            },
+            question_context={
+                "source_mode": "test-live-category-item",
+                "item_id": "item-1",
+                "uid": "chart-a.png",
+                "image_gt": "https://example.com/gt.png",
+                "model_image": "https://example.com/model.png",
+            },
+            ai_decision={"score": "0", "reason": "文字和点位存在明显偏差", "confidence": "medium"},
+            allow_temp_save=True,
+            temp_save_executor=fake_temp_save,
+        )
+
+    assert calls == []
+
+
+def test_run_task_ability_real_no_submit_refuses_recorded_payload_without_answer_leaf_fields(tmp_path: Path) -> None:
+    store = tmp_path / "task-abilities" / "ability-drafts.json"
+    review_root = tmp_path / "task-abilities" / "reviews"
+    store.parent.mkdir(parents=True)
+    store.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "draft-1",
+                        "version": "ability-test",
+                        "status": "草稿已确认",
+                        "task_name": "RFT科研图表还原-正式(随机5000题)",
+                        "task_id": "7638992213846740763",
+                        "specific_rules": "严格对比",
+                        "sample_data": "样例",
+                        "related_content": "",
+                        "system_ai_draft": "只输出 score/reason/confidence",
+                        "system_ai_trace_id": "",
+                        "provider_status": "local",
+                        "next_step": "执行真实题不提交",
+                        "created_at": "2026-05-13T00:00:00+00:00",
+                        "updated_at": "2026-05-13T00:00:00+00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_recorded_temp_payload(store)
+    dry_run_path = store.parent / "research-chart-7638992213846740763" / "research-chart-dry-run-payload.json"
+    data = json.loads(dry_run_path.read_text(encoding="utf-8"))
+    data["payload"]["AuditAnswers"][0]["Content"] = json.dumps(
+        {
+            "item": {"uid": "", "image_gt": "", "model_image": ""},
+            "data": {"label_sorce": {}, "label_remark": {}, "discard": "No", "discard_type": [], "discard_remark": None, "checkRemark": None},
+            "dataMap": {"label_sorce": {}, "label_remark": {}, "discard": "No", "discard_type": [], "discard_remark": None, "checkRemark": None},
+            "itemID": "recorded-item",
+            "isAbandoned": False,
+        },
+        ensure_ascii=False,
+    )
+    dry_run_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    calls: list[dict] = []
+
+    def fake_temp_save(payload: dict, account: dict) -> dict:
+        calls.append({"payload": payload, "account": account})
+        return {"ok": True, "status_code": 200, "base_resp_status_code": 0}
+
+    with pytest.raises(TaskAbilityFlowError, match="缺少已录制答案字段"):
+        run_task_ability_real_no_submit(
+            "draft-1",
+            store_path=store,
+            review_root=review_root,
+            queue_snapshot={
+                "task_id": "7638992213846740763",
+                "pending": 0,
+                "processing": 1,
+                "repair": 0,
+                "account_user_id": "account-1",
+                "account_name": "用户1",
+            },
+            question_context={
+                "source_mode": "test-live-category-item",
+                "item_id": "item-1",
+                "uid": "chart-a.png",
+                "image_gt": "https://example.com/gt.png",
+                "model_image": "https://example.com/model.png",
+            },
+            ai_decision={"score": "0", "reason": "文字和点位存在明显偏差", "confidence": "medium"},
+            allow_temp_save=True,
+            temp_save_executor=fake_temp_save,
+        )
+
+    assert calls == []
+
+
+def test_run_task_ability_real_no_submit_refuses_legacy_verification_fields_without_explicit_temp_save_verification(tmp_path: Path) -> None:
+    store = tmp_path / "task-abilities" / "ability-drafts.json"
+    review_root = tmp_path / "task-abilities" / "reviews"
+    store.parent.mkdir(parents=True)
+    store.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "id": "draft-1",
+                        "version": "ability-test",
+                        "status": "草稿已确认",
+                        "task_name": "RFT科研图表还原-正式(随机5000题)",
+                        "task_id": "7638992213846740763",
+                        "specific_rules": "严格对比",
+                        "sample_data": "样例",
+                        "related_content": "",
+                        "system_ai_draft": "只输出 score/reason/confidence",
+                        "system_ai_trace_id": "",
+                        "provider_status": "local",
+                        "next_step": "执行真实题不提交",
+                        "created_at": "2026-05-13T00:00:00+00:00",
+                        "updated_at": "2026-05-13T00:00:00+00:00",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        ),
+        encoding="utf-8",
+    )
+    _write_recorded_temp_payload(store)
+    dry_run_path = store.parent / "research-chart-7638992213846740763" / "research-chart-dry-run-payload.json"
+    data = json.loads(dry_run_path.read_text(encoding="utf-8"))
+    data.pop("temp_save_verification", None)
+    data["temp_draft_result"] = {"base_resp_status_code": 0}
+    data["saved_to_task_ui"] = True
+    dry_run_path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    calls: list[dict] = []
+
+    def fake_temp_save(payload: dict, account: dict) -> dict:
+        calls.append({"payload": payload, "account": account})
+        return {"ok": True, "status_code": 200, "base_resp_status_code": 0}
+
+    with pytest.raises(TaskAbilityFlowError, match="显式 temp_save_verification"):
+        run_task_ability_real_no_submit(
+            "draft-1",
+            store_path=store,
+            review_root=review_root,
+            queue_snapshot={
+                "task_id": "7638992213846740763",
+                "pending": 0,
+                "processing": 1,
+                "repair": 0,
+                "account_user_id": "account-1",
+                "account_name": "用户1",
+            },
+            question_context={
+                "source_mode": "test-live-category-item",
+                "item_id": "item-1",
+                "uid": "chart-a.png",
+                "image_gt": "https://example.com/gt.png",
+                "model_image": "https://example.com/model.png",
+            },
+            ai_decision={"score": "0", "reason": "文字和点位存在明显偏差", "confidence": "medium"},
+            allow_temp_save=True,
+            temp_save_executor=fake_temp_save,
+        )
+
+    assert calls == []
+
+
 def test_run_task_ability_real_no_submit_temp_saves_answer_for_page_review(tmp_path: Path) -> None:
     store = tmp_path / "task-abilities" / "ability-drafts.json"
     review_root = tmp_path / "task-abilities" / "reviews"
@@ -113,6 +700,7 @@ def test_run_task_ability_real_no_submit_temp_saves_answer_for_page_review(tmp_p
         ),
         encoding="utf-8",
     )
+    _write_recorded_temp_payload(store)
     calls: list[dict] = []
 
     def fake_temp_save(payload: dict, account: dict) -> dict:
@@ -204,6 +792,7 @@ def test_run_task_ability_real_no_submit_uses_live_category_current_item_for_tem
         ),
         encoding="utf-8",
     )
+    _write_recorded_temp_payload(store)
     state.write_text(
         json.dumps(
             {
@@ -326,6 +915,7 @@ def test_run_task_ability_real_no_submit_calls_task_ai_for_research_chart_images
         ),
         encoding="utf-8",
     )
+    _write_recorded_temp_payload(store)
     monkeypatch.setattr(
         "app.services.task_ability_service.get_task_ai_runtime_prompt",
         lambda: {
@@ -421,8 +1011,7 @@ def test_run_task_ability_real_no_submit_calls_task_ai_for_research_chart_images
     user_content = messages[1]["content"]
     image_urls = [part["image_url"]["url"] for part in user_content if part.get("type") == "image_url"]
     assert len(image_urls) == 2
-    assert image_urls[0].startswith("data:image/png;base64,")
-    assert image_urls[1].startswith("data:image/png;base64,")
+    assert image_urls == ["https://example.com/gt.png", "https://example.com/model.png"]
     content = json.loads(temp_calls[0]["payload"]["AuditAnswers"][0]["Content"])
     assert content["data"]["label_sorce"]["model_image"] == "1"
     assert "点位位置" in content["data"]["label_remark"]["model_image"]
@@ -458,6 +1047,7 @@ def test_run_task_ability_real_no_submit_scores_multi_model_images_and_writes_pe
         ),
         encoding="utf-8",
     )
+    _write_recorded_temp_payload(store, task_id="7639402643386830630")
     monkeypatch.setattr(
         "app.services.task_ability_service.get_task_ai_runtime_prompt",
         lambda: {
@@ -580,6 +1170,7 @@ def test_run_task_ability_real_no_submit_can_target_account_and_use_system_ai(tm
         ),
         encoding="utf-8",
     )
+    _write_recorded_temp_payload(store)
     state.write_text(
         json.dumps(
             {
@@ -792,6 +1383,7 @@ def test_run_task_ability_real_no_submit_can_claim_pending_only_item_before_scor
         ),
         encoding="utf-8",
     )
+    _write_recorded_temp_payload(store)
     state.write_text(
         json.dumps(
             {
@@ -1342,6 +1934,7 @@ def test_approve_task_ability_real_no_submit_marks_capability_available(tmp_path
         ),
         encoding="utf-8",
     )
+    _write_allowed_live_report(store)
 
     result = approve_task_ability_real_no_submit("draft-1", store_path=store)
 
@@ -1391,6 +1984,7 @@ def test_run_task_ability_real_no_submit_does_not_downgrade_already_enabled_capa
         ),
         encoding="utf-8",
     )
+    _write_recorded_temp_payload(store, task_id="7639402643386830630")
 
     def fake_temp_save(payload: dict, account: dict) -> dict:
         return {"ok": True, "status_code": 200, "base_resp_status_code": 0, "data": {"BaseResp": {"StatusCode": 0}}}
@@ -1667,6 +2261,11 @@ def test_create_and_restore_prompt_snapshot_roundtrip(tmp_path: Path) -> None:
                         "sample_data": "旧样例",
                         "related_content": "",
                         "system_ai_draft": "旧 Prompt",
+                        "task_type": "research_chart",
+                        "ability_source": "platform_form",
+                        "source_config": {"source": "old"},
+                        "field_mapping": {"score": "old_score"},
+                        "validation_rules": {"required": ["old_score"]},
                         "system_ai_trace_id": "",
                         "provider_status": "local",
                         "next_step": "执行真实题不提交",
@@ -1686,7 +2285,15 @@ def test_create_and_restore_prompt_snapshot_roundtrip(tmp_path: Path) -> None:
     snapshot = create_prompt_snapshot("7638992213846740763", note="保存旧版", store_path=store)
     updated = update_task_ability_draft(
         "draft-1",
-        {"system_ai_draft": "新 Prompt", "specific_rules": "新规则"},
+        {
+            "system_ai_draft": "新 Prompt",
+            "specific_rules": "新规则",
+            "task_type": "research_chart_v2",
+            "ability_source": "assistant",
+            "source_config": {"source": "new"},
+            "field_mapping": {"score": "new_score"},
+            "validation_rules": {"required": ["new_score"]},
+        },
         store_path=store,
     )
     restored = restore_prompt_snapshot("7638992213846740763", snapshot["snapshot_id"], store_path=store)
@@ -1695,6 +2302,11 @@ def test_create_and_restore_prompt_snapshot_roundtrip(tmp_path: Path) -> None:
     assert updated["system_ai_draft"] == "新 Prompt"
     assert restored["system_ai_draft"] == "旧 Prompt"
     assert restored["specific_rules"] == "旧规则"
+    assert restored["task_type"] == "research_chart"
+    assert restored["ability_source"] == "platform_form"
+    assert restored["source_config"] == {"source": "old"}
+    assert restored["field_mapping"] == {"score": "old_score"}
+    assert restored["validation_rules"] == {"required": ["old_score"]}
     assert restored["flow_stage"] == "real_no_submit_ready"
 
 
@@ -1728,6 +2340,7 @@ def test_approve_task_ability_version_approves_latest_task_draft(tmp_path: Path)
         ),
         encoding="utf-8",
     )
+    _write_allowed_live_report(store)
 
     result = approve_task_ability_version("7638992213846740763", store_path=store)
 

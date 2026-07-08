@@ -384,7 +384,7 @@ def _post_timer_event(account: dict[str, Any], args: argparse.Namespace, timings
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
     try:
-        response = requests.post("http://127.0.0.1:8789/api/v1/ai-timer/events", json=payload, timeout=10)
+        response = requests.post(_monitor_api_url("ai-timer/events"), headers=_monitor_api_headers(), json=payload, timeout=10)
         return {"statusCode": response.status_code, "text": response.text[:1000]}
     except Exception as exc:  # noqa: BLE001 - 本地看板未启动时不影响证据文件。
         return {"statusCode": 0, "text": str(exc)}
@@ -402,6 +402,27 @@ def _base_code(result: dict[str, Any]) -> Any:
 
 def _base_ok(result: dict[str, Any]) -> bool:
     return result.get("statusCode") == 200 and _base_code(result) == 0
+
+
+def _monitor_api_prefix() -> str:
+    raw = str(os.environ.get("AIDP_API_PREFIX") or "/api/v1").strip()
+    prefixed = raw if raw.startswith("/") else f"/{raw}"
+    normalized = re.sub(r"/+", "/", prefixed).rstrip("/")
+    return normalized if normalized and normalized != "/" else "/api/v1"
+
+
+def _monitor_api_url(suffix: str) -> str:
+    base_url = str(os.environ.get("AIDP_MONITOR_BASE_URL") or os.environ.get("AIDP_PLATFORM_BASE_URL") or "http://127.0.0.1:8789").strip()
+    normalized_base = base_url.rstrip().rstrip("/")
+    prefix = _monitor_api_prefix()
+    if normalized_base.endswith(prefix):
+        return f"{normalized_base}/{str(suffix or '').lstrip('/')}"
+    return f"{normalized_base}{prefix}/{str(suffix or '').lstrip('/')}"
+
+
+def _monitor_api_headers() -> dict[str, str]:
+    token = str(os.environ.get("AIDP_MONITOR_API_TOKEN") or os.environ.get("AIDP_ADMIN_API_TOKEN") or os.environ.get("AIDP_API_TOKEN") or "").strip()
+    return {"X-AIDP-API-Token": token} if token else {}
 
 
 if __name__ == "__main__":

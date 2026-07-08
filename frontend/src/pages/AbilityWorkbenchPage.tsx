@@ -1,4 +1,4 @@
-import { Alert, Button, Card, Col, Descriptions, Empty, Image, Input, Row, Select, Space, Spin, Steps, Table, Tabs, Tag, Typography, message } from "antd";
+import { Alert, Button, Card, Col, Descriptions, Empty, Image, Input, Row, Select, Space, Spin, Steps, Table, Tag, Typography, message } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { useEffect, useMemo, useState } from "react";
 
@@ -21,6 +21,7 @@ import {
   fetchTaskCatalog,
   fetchTestset,
   generateTestset,
+  openAccountTarget,
   restoreTaskAbilityPromptSnapshot,
   runTaskLiveHttpTest,
   saveSelectedLearningPackage,
@@ -52,9 +53,65 @@ import {
   updateTaskAbilityRunConfig,
   updateTaskAbilityDraft,
 } from "../api/client";
+import { buildStep3ReviewSummary, type Step3ReviewRow } from "./abilityWorkbenchReview";
 
 type StepIndex = 0 | 1 | 2 | 3;
-type DraftFormState = { system_ai_draft: string };
+type DraftFormState = {
+  task_type: string;
+  ability_source: string;
+  source_config_text: string;
+  field_mapping_text: string;
+  validation_rules_text: string;
+  system_ai_draft: string;
+};
+
+const EMPTY_DRAFT_FORM: DraftFormState = {
+  task_type: "",
+  ability_source: "platform_form",
+  source_config_text: "{}",
+  field_mapping_text: "{}",
+  validation_rules_text: "{}",
+  system_ai_draft: "",
+};
+
+const TASK_TYPE_OPTIONS = [
+  { value: "", label: "通用能力" },
+  { value: "3d_rubric_eval", label: "3D Rubric 标注" },
+];
+
+const ABILITY_SOURCE_OPTIONS = [
+  { value: "platform_form", label: "平台录入" },
+  { value: "assistant_authored", label: "助手录入" },
+  { value: "manual_import", label: "手册 / Markdown 导入" },
+  { value: "learning_package", label: "学习包解析" },
+  { value: "live_calibration", label: "真实题校准" },
+];
+
+function formatJsonText(value: Record<string, unknown> | undefined) {
+  return JSON.stringify(value && typeof value === "object" ? value : {}, null, 2);
+}
+
+function parseJsonObjectText(text: string, fieldName: string): Record<string, unknown> {
+  const trimmed = text.trim();
+  if (!trimmed) return {};
+  const parsed = JSON.parse(trimmed) as unknown;
+  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new Error(`${fieldName} 必须是 JSON 对象`);
+  }
+  return parsed as Record<string, unknown>;
+}
+
+function draftToForm(draft: TaskAbilityDraftItem | null): DraftFormState {
+  if (!draft) return EMPTY_DRAFT_FORM;
+  return {
+    task_type: draft.task_type || "",
+    ability_source: draft.ability_source || "platform_form",
+    source_config_text: formatJsonText(draft.source_config),
+    field_mapping_text: formatJsonText(draft.field_mapping),
+    validation_rules_text: formatJsonText(draft.validation_rules),
+    system_ai_draft: draft.system_ai_draft || "",
+  };
+}
 
 function parsePendingCount(value: string) {
   const normalized = String(value || "").replace(/,/g, "");
@@ -87,6 +144,9 @@ function dedupeTaskCatalogItems(items: TaskCatalogItem[]) {
 }
 
 function safeError(error: unknown): string {
+  const response = error && typeof error === "object" ? (error as { response?: { data?: { detail?: unknown }; status?: number } }).response : undefined;
+  if (typeof response?.data?.detail === "string" && response.data.detail) return response.data.detail;
+  if (response?.status) return `接口请求失败：code${response.status}`;
   return error instanceof Error ? error.message : "接口请求失败";
 }
 
@@ -116,6 +176,13 @@ function taskAccountIdsForTask(taskId: string, items: TaskCatalogItem[]) {
     }
   }
   return Array.from(ids);
+}
+
+function preferredSampleAccountId(taskId: string, items: TaskCatalogItem[], accounts: AccountItem[]) {
+  const accountIds = new Set(accounts.map((account) => account.user_id));
+  const taskAccountIds = taskAccountIdsForTask(taskId, items);
+  const matchedTaskAccountId = taskAccountIds.find((accountId) => accountIds.has(accountId));
+  return matchedTaskAccountId || accounts[0]?.user_id || "";
 }
 
 function hasRunId(value: unknown): value is { run_id: string } {
@@ -214,6 +281,7 @@ export function AbilityWorkbenchPage() {
   const [promptSnapshots, setPromptSnapshots] = useState<TaskAbilityPromptSnapshotResponse[]>([]);
   const [selectedSnapshotId, setSelectedSnapshotId] = useState("");
   const [liveTestLoading, setLiveTestLoading] = useState(false);
+  const [liveOpenLoading, setLiveOpenLoading] = useState(false);
   const [liveAccountId, setLiveAccountId] = useState("");
   const [liveTestResult, setLiveTestResult] = useState<TaskLiveHttpTestResponse | null>(null);
   const [learningPackages, setLearningPackages] = useState<LearningPackageItem[]>([]);
@@ -225,7 +293,7 @@ export function AbilityWorkbenchPage() {
   const [runAccountIds, setRunAccountIds] = useState<string[]>([]);
   const [preflightResult, setPreflightResult] = useState<TaskAutoRunPreflightResponse | null>(null);
   const [currentStep, setCurrentStep] = useState<StepIndex>(0);
-  const [draftForm, setDraftForm] = useState<DraftFormState>({ system_ai_draft: "" });
+  const [draftForm, setDraftForm] = useState<DraftFormState>(EMPTY_DRAFT_FORM);
   const [draftUndoStack, setDraftUndoStack] = useState<DraftFormState[]>([]);
   const [chatMessages, setChatMessages] = useState<AiChatMessage[]>([{ role: "assistant", content: "这里是系统 AI 对话区。把规则、边界、样例和判分要求发给我，我会整理成可直接保存的完整 Prompt 建议。" }]);
   const [chatInput, setChatInput] = useState("");
@@ -354,9 +422,7 @@ export function AbilityWorkbenchPage() {
         return kept.length ? kept : nextTaskAccountIds;
       });
       const nextDraft = abilityDrafts.items.find((item) => item.task_id === nextTaskId) ?? null;
-      setDraftForm({
-        system_ai_draft: nextDraft?.system_ai_draft || "",
-      });
+      setDraftForm(draftToForm(nextDraft));
       if (nextTaskId) {
         await loadTaskArtifacts(nextTaskId);
       }
@@ -373,9 +439,7 @@ export function AbilityWorkbenchPage() {
   }, []);
 
   useEffect(() => {
-    setDraftForm({
-      system_ai_draft: selectedDraft?.system_ai_draft || "",
-    });
+    setDraftForm(draftToForm(selectedDraft));
     setDraftUndoStack([]);
   }, [selectedDraft]);
 
@@ -393,15 +457,27 @@ export function AbilityWorkbenchPage() {
         return kept.length ? kept : taskScopedAccountIds;
       });
       setLiveAccountId((current) => taskScopedAccountIds.includes(current) ? current : taskScopedAccountIds[0]);
-      return;
+    } else {
+      setLiveAccountId((current) => current || accounts[0]?.user_id || "");
+      setRunAccountIds((current) => current.length ? current : accounts.slice(0, 1).map((account) => account.user_id));
     }
-    setLiveAccountId((current) => current || accounts[0]?.user_id || "");
-    setRunAccountIds((current) => current.length ? current : accounts.slice(0, 1).map((account) => account.user_id));
-  }, [accounts, selectedTaskId, taskScopedAccountIds]);
+    setSyncConfig((current) => {
+      const accountIds = new Set(accounts.map((account) => account.user_id));
+      const validTaskScopedAccountIds = taskScopedAccountIds.filter((accountId) => accountIds.has(accountId));
+      const candidateIds = validTaskScopedAccountIds.length ? validTaskScopedAccountIds : accounts.map((account) => account.user_id);
+      if (current.account_id && candidateIds.includes(current.account_id)) return current;
+      const nextAccountId = preferredSampleAccountId(selectedTaskId, tasks, accounts);
+      return { ...current, account_id: nextAccountId };
+    });
+  }, [accounts, selectedTaskId, taskScopedAccountIds, tasks]);
 
   const handleTaskChange = async (taskId: string) => {
     setSelectedTaskId(taskId);
+    setCurrentStep(0);
+    setLiveTestResult(null);
+    setPreflightResult(null);
     const nextTaskAccountIds = taskAccountIdsForTask(taskId, tasks);
+    setSyncConfig((current) => ({ ...current, account_id: preferredSampleAccountId(taskId, tasks, accounts) }));
     setRunAccountIds(nextTaskAccountIds);
     setLiveAccountId(nextTaskAccountIds[0] || accounts[0]?.user_id || "");
     setSelectedReplayUid("");
@@ -494,7 +570,14 @@ export function AbilityWorkbenchPage() {
   const handleSaveDraft = async () => {
     if (!selectedDraft) return;
     try {
-      await updateTaskAbilityDraft(selectedDraft.id, { system_ai_draft: draftForm.system_ai_draft });
+      await updateTaskAbilityDraft(selectedDraft.id, {
+        task_type: draftForm.task_type,
+        ability_source: draftForm.ability_source,
+        source_config: parseJsonObjectText(draftForm.source_config_text, "来源配置"),
+        field_mapping: parseJsonObjectText(draftForm.field_mapping_text, "字段映射"),
+        validation_rules: parseJsonObjectText(draftForm.validation_rules_text, "校验规则"),
+        system_ai_draft: draftForm.system_ai_draft,
+      });
       await load();
       message.success("已保存当前 Prompt / 草稿，并重置为待重新验证。");
     } catch (error: unknown) {
@@ -642,7 +725,7 @@ export function AbilityWorkbenchPage() {
     if (!selectedTaskId) return;
     setLiveTestLoading(true);
     try {
-      const result = await runTaskLiveHttpTest(selectedTaskId, { account_user_id: liveAccountId, use_system_ai_for_vision: true });
+      const result = await runTaskLiveHttpTest(selectedTaskId, { account_user_id: liveAccountId, use_system_ai_for_vision: false });
       setLiveTestResult(result);
       await loadTaskArtifacts(selectedTaskId);
       message.success(result.saved_to_task_ui ? "Live 暂存验证已完成：已暂存、未正式提交。" : result.message);
@@ -718,6 +801,31 @@ export function AbilityWorkbenchPage() {
     }
   };
 
+  const handleOpenLiveAccountTask = async () => {
+    if (!liveAccountId) {
+      message.warning("先选择验证账号。");
+      return;
+    }
+    setLiveOpenLoading(true);
+    const popup = window.open("about:blank", "_blank");
+    if (popup) {
+      popup.opener = null;
+    }
+    try {
+      const result = await openAccountTarget(liveAccountId, "task");
+      if (popup) {
+        popup.location.replace(result.open_url);
+      } else {
+        window.open(result.open_url, "_blank", "noopener,noreferrer");
+      }
+    } catch (error: unknown) {
+      popup?.close();
+      message.error(safeError(error));
+    } finally {
+      setLiveOpenLoading(false);
+    }
+  };
+
   const testsetRows = (testset?.sample_ids ?? generatedTestset?.sample_ids ?? []).map((uid) => ({ uid }));
   const testsetColumns: ColumnsType<{ uid: string }> = [
     { title: "#", key: "index", render: (_, __, index) => String(index + 1).padStart(2, "0"), width: 60 },
@@ -731,9 +839,50 @@ export function AbilityWorkbenchPage() {
   ];
 
   const liveTestReportId = liveTestResult?.report_id || String(runGate?.live_test_report?.report_id || "");
+  const liveReviewSummary = liveTestResult ? buildStep3ReviewSummary(liveTestResult) : null;
+  const canOperateStep4 = Boolean(liveReviewSummary?.canEnterStep4);
+  const handleWorkbenchStepChange = (value: number) => {
+    if (value === 3 && !canOperateStep4) {
+      message.warning("先完成 Step3，且结论为允许通过后再进入 Step4。");
+      return;
+    }
+    setCurrentStep(value as StepIndex);
+  };
   const lastTrialRun = hasRunId(runGate?.last_trial_run) ? runGate?.last_trial_run : null;
   const lastProductionRun = hasRunId(runGate?.last_production_run) ? runGate?.last_production_run : null;
   const replayCards = replayResult?.cards ?? [];
+  const liveReviewColumns: ColumnsType<Step3ReviewRow> = [
+    { title: "顺序", dataIndex: "order", key: "order", width: 72 },
+    { title: "题目 / 项", dataIndex: "qwenOutput", key: "qwenOutput", width: 240 },
+    {
+      title: "qwen 输出原因",
+      dataIndex: "qwenReason",
+      key: "qwenReason",
+      render: (value: string) => value ? <Typography.Paragraph style={{ margin: 0 }}>{value}</Typography.Paragraph> : <Typography.Text type="danger">未填写原因</Typography.Text>,
+    },
+    {
+      title: "平台判断",
+      dataIndex: "assistantJudgement",
+      key: "assistantJudgement",
+      width: 128,
+      render: (value: Step3ReviewRow["assistantJudgement"]) => {
+        const color = value === "通过" ? "green" : value === "不允许通过" ? "red" : "gold";
+        return <Tag color={color}>{value}</Tag>;
+      },
+    },
+    {
+      title: "判断依据",
+      dataIndex: "judgementReason",
+      key: "judgementReason",
+      render: (value: string) => <Typography.Text type="secondary">{value}</Typography.Text>,
+    },
+  ];
+
+  useEffect(() => {
+    if (currentStep === 3 && !canOperateStep4) {
+      setCurrentStep(2);
+    }
+  }, [canOperateStep4, currentStep, selectedTaskId]);
 
   return (
     <div className="page-stack">
@@ -746,7 +895,7 @@ export function AbilityWorkbenchPage() {
             </div>
             <Steps
               current={currentStep}
-              onChange={(value) => setCurrentStep(value as StepIndex)}
+              onChange={handleWorkbenchStepChange}
               items={[
                 { title: "获取测试样本", description: "同步已提交样本池并固定测试集。" },
                 { title: "能力调教", description: "系统 AI / Prompt / 10 题回放。" },
@@ -791,12 +940,12 @@ export function AbilityWorkbenchPage() {
                   <Descriptions.Item label="当前能力">{selectedDraft ? `${selectedDraft.status} / ${selectedDraft.version}` : "未创建"}</Descriptions.Item>
                 </Descriptions>
                 <Space wrap>
-                  <Button type="primary" loading={syncLoading} onClick={() => void handleSyncSubmittedHistory(false)}>同步已提交样本</Button>
-                  <Button loading={syncLoading} onClick={() => void handleSyncSubmittedHistory(true)}>强制重同步</Button>
+                  <Button type="primary" loading={syncLoading} disabled={!syncConfig.account_id} onClick={() => void handleSyncSubmittedHistory(false)}>同步已提交样本</Button>
+                  <Button loading={syncLoading} disabled={!syncConfig.account_id} onClick={() => void handleSyncSubmittedHistory(true)}>强制重同步</Button>
                   <Select
                     style={{ width: 280 }}
                     value={syncConfig.account_id || undefined}
-                    placeholder="样本来源账号（默认任务源）"
+                    placeholder="样本来源账号（自动选择）"
                     options={accounts.map((account) => ({
                       value: account.user_id,
                       label: `${account.display_name || account.custom_name || account.user_id} / ${account.user_id}`,
@@ -897,13 +1046,57 @@ export function AbilityWorkbenchPage() {
                     <Card title="做题 Prompt" size="small" className="workbench-card">
                       {selectedDraft ? (
                         <Space direction="vertical" size="middle" style={{ width: "100%" }}>
+                          <Descriptions bordered size="small" column={2}>
+                            <Descriptions.Item label="任务类型">
+                              <Select
+                                style={{ width: "100%" }}
+                                value={draftForm.task_type}
+                                options={TASK_TYPE_OPTIONS}
+                                onChange={(value) => setDraftForm((current) => ({ ...current, task_type: value }))}
+                              />
+                            </Descriptions.Item>
+                            <Descriptions.Item label="规则来源">
+                              <Select
+                                style={{ width: "100%" }}
+                                value={draftForm.ability_source}
+                                options={ABILITY_SOURCE_OPTIONS}
+                                onChange={(value) => setDraftForm((current) => ({ ...current, ability_source: value }))}
+                              />
+                            </Descriptions.Item>
+                          </Descriptions>
+                          <Row gutter={[8, 8]}>
+                            <Col xs={24} xl={8}>
+                              <Typography.Text strong>来源配置 JSON</Typography.Text>
+                              <Input.TextArea
+                                rows={5}
+                                value={draftForm.source_config_text}
+                                onChange={(event) => setDraftForm((current) => ({ ...current, source_config_text: event.target.value }))}
+                              />
+                            </Col>
+                            <Col xs={24} xl={8}>
+                              <Typography.Text strong>字段映射 JSON</Typography.Text>
+                              <Input.TextArea
+                                rows={5}
+                                value={draftForm.field_mapping_text}
+                                onChange={(event) => setDraftForm((current) => ({ ...current, field_mapping_text: event.target.value }))}
+                              />
+                            </Col>
+                            <Col xs={24} xl={8}>
+                              <Typography.Text strong>校验规则 JSON</Typography.Text>
+                              <Input.TextArea
+                                rows={5}
+                                value={draftForm.validation_rules_text}
+                                onChange={(event) => setDraftForm((current) => ({ ...current, validation_rules_text: event.target.value }))}
+                              />
+                            </Col>
+                          </Row>
                           <div>
                             <Typography.Text strong>完整 Prompt 草稿</Typography.Text>
                             <Input.TextArea rows={18} value={draftForm.system_ai_draft} onChange={(event) => setDraftForm((current) => ({ ...current, system_ai_draft: event.target.value }))} />
                           </div>
                           <Space wrap>
                             <Button type="primary" onClick={() => void handleSaveDraft()}>保存当前 Prompt</Button>
-                            <Button onClick={() => setDraftForm({ system_ai_draft: selectedDraft.system_ai_draft })}>恢复当前已加载版本</Button>
+                            <Button onClick={() => setDraftForm(draftToForm(selectedDraft))}>恢复当前已加载版本</Button>
                           </Space>
                         </Space>
                       ) : <Empty description="当前任务还没有能力草稿。" />}
@@ -1006,12 +1199,17 @@ export function AbilityWorkbenchPage() {
         ) : null}
 
         {currentStep === 2 ? (
-          <Card title="步骤 3：Live 暂存验证">
+          <Card title="步骤 3：审核结果台">
             <Space direction="vertical" size="middle" style={{ width: "100%" }}>
-              <Alert type="warning" showIcon message="纯 HTTP 端到端不提交暂存测试" description="这里默认回读最近一次正式 Live 暂存报告。页面刷新后仍能看到最近结果，并继续明确显示已暂存/未正式提交。" />
+              <Alert
+                type={liveReviewSummary?.alertType || "info"}
+                showIcon
+                message={liveReviewSummary ? `结论：${liveReviewSummary.statusLabel}` : "等待执行 Step3"}
+                description={liveReviewSummary?.conclusion || "执行后这里只展示通用审核结果：qwen 按顺序输出的原因、平台判断和是否允许进入 Step4；题面与暂存答案请直达账号任务页查看。"}
+              />
               <Descriptions bordered size="small" column={2}>
                 <Descriptions.Item label="当前任务">{selectedTask?.raw_task_name || selectedTask?.task_id || "-"}</Descriptions.Item>
-                <Descriptions.Item label="执行边界">纯 HTTP 端到端不提交暂存测试</Descriptions.Item>
+                <Descriptions.Item label="执行边界">{liveReviewSummary?.boundaryLabel || "纯 HTTP 端到端不提交暂存测试"}</Descriptions.Item>
                 <Descriptions.Item label="验证账号">
                   <Select
                     style={{ width: 320 }}
@@ -1023,42 +1221,20 @@ export function AbilityWorkbenchPage() {
                   />
                 </Descriptions.Item>
                 <Descriptions.Item label="最近报告">{liveTestReportId || "暂无"}</Descriptions.Item>
-                <Descriptions.Item label="已暂存">{liveTestResult ? (liveTestResult.saved_to_task_ui ? "是" : "否") : "未执行"}</Descriptions.Item>
-                <Descriptions.Item label="已正式提交">{liveTestResult ? (liveTestResult.submits_remote ? "是" : "否") : "否"}</Descriptions.Item>
+                <Descriptions.Item label="题目ID">{liveReviewSummary?.itemId || "-"}</Descriptions.Item>
+                <Descriptions.Item label="审核状态">{liveReviewSummary?.reviewStatus || "未执行"}</Descriptions.Item>
+                <Descriptions.Item label="已暂存">{liveReviewSummary?.savedLabel || "未执行"}</Descriptions.Item>
+                <Descriptions.Item label="已正式提交">{liveReviewSummary?.submittedLabel || "否"}</Descriptions.Item>
               </Descriptions>
               {liveTestResult ? (
-                <Card title="最近一次 Live 暂存验证结果" size="small" className="workbench-card">
-                  <Tabs
-                    items={[
-                      {
-                        key: "output",
-                        label: "AI 输出预览",
-                        children: <div className="workbench-json-panel"><pre className="pre-wrap">{JSON.stringify(liveTestResult.saved_answer || liveTestResult.answer_preview, null, 2)}</pre></div>,
-                      },
-                      {
-                        key: "request",
-                        label: "请求 / Payload",
-                        children: <div className="workbench-json-panel"><pre className="pre-wrap">{JSON.stringify(liveTestResult.temp_draft_payload_preview || {}, null, 2)}</pre></div>,
-                      },
-                      {
-                        key: "response",
-                        label: "响应",
-                        children: <div className="workbench-json-panel"><pre className="pre-wrap">{JSON.stringify(liveTestResult.temp_draft_result || {}, null, 2)}</pre></div>,
-                      },
-                      {
-                        key: "validation",
-                        label: "字段校验",
-                        children: (
-                          <Descriptions bordered size="small" column={1}>
-                            <Descriptions.Item label="阶段">{liveTestResult.stage}</Descriptions.Item>
-                            <Descriptions.Item label="审核状态">{liveTestResult.review_status}</Descriptions.Item>
-                            <Descriptions.Item label="题目ID">{String(liveTestResult.question_context?.item_id || "-")}</Descriptions.Item>
-                            <Descriptions.Item label="请求边界">{liveTestResult.writes_remote ? "已写入暂存接口" : "未写入"} / 正式提交：{liveTestResult.submits_remote ? "是" : "否"}</Descriptions.Item>
-                            <Descriptions.Item label="结果说明">{liveTestResult.ui_review_hint || liveTestResult.message}</Descriptions.Item>
-                          </Descriptions>
-                        ),
-                      },
-                    ]}
+                <Card title="qwen 原因与平台判断" size="small" className="workbench-card">
+                  <Table
+                    size="small"
+                    rowKey="key"
+                    columns={liveReviewColumns}
+                    dataSource={liveReviewSummary?.rows || []}
+                    pagination={false}
+                    locale={{ emptyText: "未解析到 qwen 输出原因，请重跑 Step3 或检查能力草稿。" }}
                   />
                 </Card>
               ) : (
@@ -1067,8 +1243,9 @@ export function AbilityWorkbenchPage() {
               <Space wrap>
                 <Button type="primary" loading={liveTestLoading} onClick={() => void handleRunLiveHttpTest()}>执行 Live 暂存验证</Button>
                 <Button onClick={() => void loadTaskArtifacts(selectedTaskId)} disabled={!selectedTaskId}>读取最近一次 Live 结果</Button>
+                <Button loading={liveOpenLoading} onClick={() => void handleOpenLiveAccountTask()} disabled={!liveAccountId}>直达账号任务</Button>
                 <Button href="/tasks">进入任务操作台查看旧流程</Button>
-                <Button onClick={() => setCurrentStep(3)}>下一步：批准并运行</Button>
+                <Button onClick={() => setCurrentStep(3)} disabled={!liveReviewSummary?.canEnterStep4}>下一步：批准并运行</Button>
               </Space>
             </Space>
           </Card>
@@ -1103,10 +1280,10 @@ export function AbilityWorkbenchPage() {
                         showSearch
                       />
                       <Space wrap>
-                        <Button type="primary" loading={approveLoading} disabled={!runGate?.can_approve} onClick={() => void handleApproveAbilityVersion()}>批准当前能力版本</Button>
-                        <Button loading={preflightLoading} onClick={() => void handleRunPreflight()} disabled={!selectedTaskId || !runAccountIds.length}>启动前自检</Button>
-                        <Button loading={trialLoading} disabled={!runGate?.can_start_trial || !runAccountIds.length} onClick={() => void handleStartTrialRun()}>启动试运行</Button>
-                        <Button loading={productionLoading} disabled={!runGate?.can_start_production || !runAccountIds.length} onClick={() => void handleStartProductionRun()}>启动生产运行</Button>
+                        <Button type="primary" loading={approveLoading} disabled={!canOperateStep4 || !runGate?.can_approve} onClick={() => void handleApproveAbilityVersion()}>批准当前能力版本</Button>
+                        <Button loading={preflightLoading} onClick={() => void handleRunPreflight()} disabled={!canOperateStep4 || !selectedTaskId || !runAccountIds.length}>启动前自检</Button>
+                        <Button loading={trialLoading} disabled={!canOperateStep4 || !runGate?.can_start_trial || !runAccountIds.length} onClick={() => void handleStartTrialRun()}>启动试运行</Button>
+                        <Button loading={productionLoading} disabled={!canOperateStep4 || !runGate?.can_start_production || !runAccountIds.length} onClick={() => void handleStartProductionRun()}>启动生产运行</Button>
                         <Button loading={runControlLoading} disabled={!managedRun?.run_id} onClick={() => void handlePauseManagedRun()}>暂停运行</Button>
                         <Button danger loading={runControlLoading} disabled={!managedRun?.run_id} onClick={() => void handleStopManagedRun()}>停止运行</Button>
                       </Space>
@@ -1128,7 +1305,6 @@ export function AbilityWorkbenchPage() {
                         options={[
                           { value: "safe", label: "慢速安全" },
                           { value: "normal", label: "普通生产" },
-                          { value: "aggressive", label: "激进抢题" },
                         ]}
                         onChange={(value) => setRunConfig((current) => ({ ...current, mode: value }))}
                       />

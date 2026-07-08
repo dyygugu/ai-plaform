@@ -5,10 +5,11 @@ from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy.orm import Session
 
+from app.core.security import legacy_production_routes_blocked
 from app.db.session import get_db
 from app.schemas.task_auto_runs import TaskAutoRunPreflightResponse, TaskAutoRunResponse, TaskAutoRunStartRequest, TaskAutoRunWorkerStartRequest, TaskAutoRunWorkerStatusResponse
 from app.services.bon8_worker_service import Bon8RunWorkerRegistry, Bon8RunWorkerStatus
-from app.services.task_auto_run_service import check_task_auto_run_preflight, default_task_auto_run_adapters, find_active_task_auto_run, get_task_auto_run, start_task_auto_run, stop_task_auto_run
+from app.services.task_auto_run_service import check_task_auto_run_preflight, default_task_auto_run_adapters, find_active_task_auto_run, get_task_auto_run, start_task_auto_run, stop_task_auto_run, tick_task_auto_run
 from app.services.task_rules import utc_now
 from app.services.task_auto_run_worker_service import GenericTaskAutoRunWorkerRegistry, GenericTaskAutoRunWorkerStatus
 
@@ -17,6 +18,8 @@ router = APIRouter(prefix="/task-auto-runs", tags=["task-auto-runs"])
 
 @router.post("/start", response_model=TaskAutoRunResponse)
 def start_auto_run(payload: TaskAutoRunStartRequest, request: Request, db: Session = Depends(get_db)) -> TaskAutoRunResponse:
+    if legacy_production_routes_blocked():
+        raise HTTPException(status_code=410, detail="旧自动做题启动入口已关闭。请使用 AI 标注能力工作台 Step4 的生产运行入口。")
     try:
         return start_task_auto_run(db, payload, adapters=_adapters(request), state_dir=_state_dir(request))
     except ValueError as exc:
@@ -54,6 +57,8 @@ def stop_auto_run(run_id: str, request: Request) -> TaskAutoRunResponse:
 
 @router.post("/runs/{run_id}/worker/start", response_model=TaskAutoRunWorkerStatusResponse)
 async def start_auto_run_worker(run_id: str, payload: TaskAutoRunWorkerStartRequest, request: Request) -> TaskAutoRunWorkerStatusResponse:
+    if legacy_production_routes_blocked():
+        raise HTTPException(status_code=410, detail="旧后台循环启动入口已关闭。请使用 AI 标注能力工作台 Step4 的试运行/生产运行入口，并等待专用执行器门禁放行。")
     run = read_auto_run(run_id, request)
     if run.adapter_key != "bon8":
         adapter = _adapter_by_key(request, run.adapter_key)
@@ -73,7 +78,7 @@ async def start_auto_run_worker(run_id: str, payload: TaskAutoRunWorkerStartRequ
     worker = registry.ensure(run.adapter_run_id, interval_seconds=payload.interval_seconds)
     await worker.run_once()
     if worker.status.last_ok:
-        worker.start()
+        worker.start(run_immediately=False)
     return _worker_status_response(run.run_id, run.adapter_run_id, worker.snapshot())
 
 
@@ -136,7 +141,7 @@ def _run_generic_auto_tick(request: Request, run_id: str) -> None:
     adapter = _adapter_by_key(request, run.adapter_key)
     if adapter is None or not hasattr(adapter, "tick"):
         raise ValueError("该题型自动执行器尚未接入后台循环。")
-    adapter.tick(run.adapter_run_id)
+    tick_task_auto_run(run_id, adapters=_adapters(request), state_dir=_state_dir(request))
 
 
 def _worker_status_response(run_id: str, adapter_run_id: str, status: Bon8RunWorkerStatus) -> TaskAutoRunWorkerStatusResponse:

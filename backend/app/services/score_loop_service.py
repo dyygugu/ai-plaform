@@ -29,6 +29,7 @@ from app.schemas.score_loop import (
 from app.schemas.worker import WorkerEventReportRequest
 from app.services.ai_confirmation_service import create_confirmation_requests
 from app.services.ai_service import draft_task_ai_answer
+from app.services.api_paths import api_path
 from app.services.audit_service import write_audit
 from app.services.task_rules import utc_now
 from app.services.worker_service import report_worker_event
@@ -75,7 +76,7 @@ def build_score_loop_summary(db: Session) -> ScoreLoopSummaryResponse:
         guardrails=[
             "首版只支持 RFT人标_美观度；未知题型默认暂停。",
             "AI 草稿必须人工确认后才能进入提交确认队列。",
-            "真实提交属于高危动作，复用 /api/v1/ai/confirmations；批准只授权，不自动绕过执行闸门。",
+            f"真实提交属于高危动作，复用 {api_path('/ai/confirmations')}；批准只授权，不自动绕过执行闸门。",
             "继续下一题 checkbox 不得被评分插件或内置 AI 自动触碰。",
             "Cookie、API key、token 和账号密码不得进入题面、日志、前端或报告。",
         ],

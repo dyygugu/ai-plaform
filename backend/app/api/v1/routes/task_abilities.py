@@ -1,12 +1,15 @@
+from typing import Optional
+
 from fastapi import APIRouter, Depends, HTTPException, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.schemas.learning_package import SelectLearningPackageRequest
 from app.schemas.task_auto_runs import TaskAutoRunPreflightResponse, TaskAutoRunResponse, TaskAutoRunStartRequest
 from app.schemas.task_ability import TaskAbilityDraftCreateRequest, TaskAbilityDraftListResponse, TaskAbilityDraftRead
-from app.services.task_auto_run_service import check_task_auto_run_preflight, default_task_auto_run_adapters, start_task_auto_run
+from app.services.task_auto_run_service import check_task_auto_run_preflight, default_task_auto_run_adapters, get_task_auto_run, start_task_auto_run, tick_task_auto_run
+from app.services.task_auto_run_worker_service import GenericTaskAutoRunWorkerRegistry
 from app.services.task_ability_service import (
     approve_task_ability_version as approve_task_ability_version_by_task,
     build_task_ability_payload_debug,
@@ -26,6 +29,7 @@ from app.services.task_ability_service import (
     approve_task_ability_draft,
     approve_task_ability_real_no_submit,
     create_task_ability_draft,
+    is_task_ability_3d_rubric_draft,
     list_task_ability_drafts,
     restore_prompt_snapshot,
     run_task_ability_live_http_test,
@@ -42,18 +46,23 @@ router = APIRouter(prefix="/task-abilities", tags=["task-abilities"])
 
 class TaskAbilityRealNoSubmitRequest(BaseModel):
     account_user_id: str = ""
-    use_system_ai_for_vision: bool = True
+    use_system_ai_for_vision: bool = False
 
 
 class TaskAbilityDraftUpdateRequest(BaseModel):
-    task_name: str = ""
-    task_id: str = ""
-    specific_rules: str = ""
-    sample_data: str = ""
-    related_content: str = ""
-    system_ai_draft: str = ""
-    system_ai_trace_id: str = ""
-    provider_status: str = ""
+    task_name: Optional[str] = None
+    task_id: Optional[str] = None
+    task_type: Optional[str] = None
+    ability_source: Optional[str] = None
+    source_config: Optional[dict] = Field(default=None)
+    field_mapping: Optional[dict] = Field(default=None)
+    validation_rules: Optional[dict] = Field(default=None)
+    specific_rules: Optional[str] = None
+    sample_data: Optional[str] = None
+    related_content: Optional[str] = None
+    system_ai_draft: Optional[str] = None
+    system_ai_trace_id: Optional[str] = None
+    provider_status: Optional[str] = None
 
 
 class TaskAbilityPromptSnapshotRequest(BaseModel):
@@ -122,10 +131,11 @@ def approve_draft(draft_id: str) -> dict:
 @router.post("/drafts/{draft_id}/real-no-submit")
 def run_real_no_submit(draft_id: str, payload: TaskAbilityRealNoSubmitRequest = TaskAbilityRealNoSubmitRequest(), db: Session = Depends(get_db)) -> dict:
     try:
+        is_3d_preview_only = is_task_ability_3d_rubric_draft(draft_id)
         return run_task_ability_real_no_submit(
             draft_id,
             db=db,
-            allow_temp_save=True,
+            allow_temp_save=not is_3d_preview_only,
             target_account_user_id=payload.account_user_id,
             use_system_ai_for_vision=payload.use_system_ai_for_vision,
         )
@@ -144,7 +154,7 @@ def approve_real_no_submit(draft_id: str) -> dict:
 @router.put("/drafts/{draft_id}")
 def update_draft(draft_id: str, payload: TaskAbilityDraftUpdateRequest) -> dict:
     try:
-        updates = {key: value for key, value in payload.model_dump().items() if value not in (None, "")}
+        updates = {key: value for key, value in payload.model_dump(exclude_unset=True).items() if value is not None}
         return update_task_ability_draft(draft_id, updates)
     except TaskAbilityFlowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -215,7 +225,7 @@ def restore_task_prompt_snapshot(task_id: str, payload: TaskAbilityPromptRestore
 @router.put("/{task_id}/prompt")
 def update_task_prompt(task_id: str, payload: TaskAbilityDraftUpdateRequest) -> dict:
     try:
-        updates = {key: value for key, value in payload.model_dump().items() if value not in (None, "")}
+        updates = {key: value for key, value in payload.model_dump().items() if value is not None}
         return update_task_ability_prompt_by_task(task_id, updates)
     except (TaskAbilityFlowError, FileNotFoundError) as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -316,30 +326,95 @@ def approve_task_ability_version(task_id: str) -> dict:
 
 @router.post("/{task_id}/trial-run", response_model=TaskAutoRunResponse)
 def start_task_trial_run(task_id: str, payload: TaskAbilityRunRequest, request: Request, db: Session = Depends(get_db)) -> TaskAutoRunResponse:
-    run_config = update_task_ability_run_config(task_id, dict(payload.run_config or {}))
-    run_request = TaskAutoRunStartRequest(task_id=str(task_id), node_id=payload.node_id, account_user_ids=payload.account_user_ids, run_config=run_config)
     try:
+        gate = get_task_ability_run_gate(task_id)
+        if not gate.get("can_start_trial"):
+            raise TaskAbilityFlowError(str(gate.get("next_step") or "请先通过 Step3 审核并启用做题能力，再启动试运行。"))
+        run_config = update_task_ability_run_config(task_id, dict(payload.run_config or {}))
+        run_config = {**run_config, "ability_run_mode": "trial"}
+        run_request = TaskAutoRunStartRequest(task_id=str(task_id), node_id=payload.node_id, account_user_ids=payload.account_user_ids, run_config=run_config)
         run = start_task_auto_run(db, run_request, adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()), state_dir=getattr(request.app.state, "task_auto_run_state_dir", None))
-        record_task_ability_run(task_id, "trial", run)
-        return run
+        ticked = tick_task_auto_run(_run_id(run), adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()), state_dir=getattr(request.app.state, "task_auto_run_state_dir", None))
+        record_task_ability_run(task_id, "trial", ticked)
+        return ticked
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TaskAbilityFlowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+def _run_id(run: object) -> str:
+    if isinstance(run, dict):
+        return str(run.get("run_id") or "")
+    return str(getattr(run, "run_id", "") or "")
+
+
 @router.post("/{task_id}/production-run", response_model=TaskAutoRunResponse)
-def start_task_production_run(task_id: str, payload: TaskAbilityRunRequest, request: Request, db: Session = Depends(get_db)) -> TaskAutoRunResponse:
-    run_config = update_task_ability_run_config(task_id, dict(payload.run_config or {}))
-    run_request = TaskAutoRunStartRequest(task_id=str(task_id), node_id=payload.node_id, account_user_ids=payload.account_user_ids, run_config=run_config)
+async def start_task_production_run(task_id: str, payload: TaskAbilityRunRequest, request: Request, db: Session = Depends(get_db)) -> TaskAutoRunResponse:
     try:
         gate = get_task_ability_run_gate(task_id)
         if not gate.get("can_start_production"):
             raise TaskAbilityFlowError(str(gate.get("next_step") or "请先完成试运行，再人工确认后启动生产运行。"))
+        run_config = update_task_ability_run_config(task_id, dict(payload.run_config or {}))
+        run_config = {**run_config, "ability_run_mode": "production"}
+        run_request = TaskAutoRunStartRequest(task_id=str(task_id), node_id=payload.node_id, account_user_ids=payload.account_user_ids, run_config=run_config)
         run = start_task_auto_run(db, run_request, adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()), state_dir=getattr(request.app.state, "task_auto_run_state_dir", None))
-        record_task_ability_run(task_id, "production", run)
-        return run
+        ticked = await _start_step4_production_worker(request, _run_id(run), run_config)
+        record_task_ability_run(task_id, "production", ticked)
+        return ticked
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except TaskAbilityFlowError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _start_step4_production_worker(request: Request, run_id: str, run_config: dict) -> TaskAutoRunResponse:
+    registry = _generic_worker_registry(request)
+    worker = registry.ensure(
+        run_id,
+        tick_func=lambda: tick_task_auto_run(
+            run_id,
+            adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()),
+            state_dir=getattr(request.app.state, "task_auto_run_state_dir", None),
+        ),
+        interval_seconds=_worker_interval_seconds(run_config),
+    )
+    first_tick = await worker.run_once()
+    if not worker.status.last_ok:
+        raise ValueError(worker.status.last_error or "生产运行首轮执行失败。")
+    latest = first_tick if first_tick is not None else get_task_auto_run(
+        run_id,
+        adapters=getattr(request.app.state, "task_auto_run_adapters", default_task_auto_run_adapters()),
+        state_dir=getattr(request.app.state, "task_auto_run_state_dir", None),
+    )
+    if _run_status(latest) == "blocked":
+        raise ValueError(_run_last_error(latest) or "生产运行首轮被执行器阻断。")
+    worker.start()
+    return latest
+
+
+def _generic_worker_registry(request: Request) -> GenericTaskAutoRunWorkerRegistry:
+    registry = getattr(request.app.state, "generic_task_auto_run_worker_registry", None)
+    if registry is None:
+        registry = GenericTaskAutoRunWorkerRegistry()
+        request.app.state.generic_task_auto_run_worker_registry = registry
+    return registry
+
+
+def _worker_interval_seconds(run_config: dict) -> int:
+    try:
+        return max(1, int(run_config.get("worker_interval_seconds") or 5))
+    except (TypeError, ValueError):
+        return 5
+
+
+def _run_status(run: object) -> str:
+    if isinstance(run, dict):
+        return str(run.get("status") or "").lower()
+    return str(getattr(run, "status", "") or "").lower()
+
+
+def _run_last_error(run: object) -> str:
+    if isinstance(run, dict):
+        return str(run.get("last_error") or "")
+    return str(getattr(run, "last_error", "") or "")

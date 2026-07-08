@@ -1,7 +1,8 @@
 from functools import lru_cache
+import re
 from typing import List
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -17,6 +18,17 @@ class Settings(BaseSettings):
         default=r"^(https:\/\/([^/]+\.)?aidp\.juejin\.cn|chrome-extension:\/\/[a-p0-9]+|http:\/\/localhost(?::\d+)?|http:\/\/127\.0\.0\.1(?::\d+)?)$",
         alias="AIDP_CORS_ORIGIN_REGEX",
     )
+    auth_enabled: bool = Field(default=False, alias="AIDP_AUTH_ENABLED")
+    admin_api_token: str = Field(default="", alias="AIDP_ADMIN_API_TOKEN")
+    operator_api_token: str = Field(default="", alias="AIDP_OPERATOR_API_TOKEN")
+    readonly_api_token: str = Field(default="", alias="AIDP_READONLY_API_TOKEN")
+    browser_extension_api_token: str = Field(default="", alias="AIDP_BROWSER_EXTENSION_API_TOKEN")
+    web_login_phone: str = Field(default="", alias="AIDP_WEB_LOGIN_PHONE")
+    web_login_password_hash: str = Field(default="", alias="AIDP_WEB_LOGIN_PASSWORD_HASH")
+    web_session_secret: str = Field(default="", alias="AIDP_WEB_SESSION_SECRET")
+    web_session_ttl_seconds: int = Field(default=7 * 24 * 60 * 60, alias="AIDP_WEB_SESSION_TTL_SECONDS")
+    trusted_proxy_cidrs: str = Field(default="", alias="AIDP_TRUSTED_PROXY_CIDRS")
+    legacy_production_routes_enabled: bool = Field(default=False, alias="AIDP_LEGACY_PRODUCTION_ROUTES_ENABLED")
     task_source_account_user_id: str = Field(default="", alias="AIDP_TASK_SOURCE_ACCOUNT_USER_ID")
     public_base_url: str = Field(default="http://localhost:8789", alias="AIDP_PUBLIC_BASE_URL")
     backup_local_retention_days: int = Field(default=7, alias="AIDP_BACKUP_LOCAL_RETENTION_DAYS")
@@ -46,6 +58,7 @@ class Settings(BaseSettings):
     earnings_config_path: str = Field(default="./data/earnings-config.json", alias="AIDP_EARNINGS_CONFIG_PATH")
     earnings_ledger_path: str = Field(default="./data/earnings-ledger.json", alias="AIDP_EARNINGS_LEDGER_PATH")
     notification_config_path: str = Field(default="./config/notifications.json", alias="AIDP_NOTIFICATION_CONFIG_PATH")
+    notification_cooldown_path: str = Field(default="./data/notification-cooldown.json", alias="AIDP_NOTIFICATION_COOLDOWN_PATH")
     feishu_webhook_url: str = Field(default="", alias="AIDP_FEISHU_WEBHOOK_URL")
     feishu_secret: str = Field(default="", alias="AIDP_FEISHU_SECRET")
     notify_enabled: bool = Field(default=False, alias="AIDP_NOTIFY_ENABLED")
@@ -53,6 +66,16 @@ class Settings(BaseSettings):
     notify_events: str = Field(default="backend.error,backend.unhandled_exception,audit.error,worker.error,alert.evaluation.failed,alert.evaluation.warning", alias="AIDP_NOTIFY_EVENTS")
     notify_dry_run: bool = Field(default=False, alias="AIDP_NOTIFY_DRY_RUN")
     notify_cooldown_seconds: int = Field(default=300, alias="AIDP_NOTIFY_COOLDOWN_SECONDS")
+
+    @field_validator("api_prefix", mode="before")
+    @classmethod
+    def normalize_api_prefix(cls, value: object) -> str:
+        raw = str(value or "").strip()
+        if not raw:
+            return "/api/v1"
+        with_leading_slash = raw if raw.startswith("/") else f"/{raw}"
+        normalized = re.sub(r"/+", "/", with_leading_slash).rstrip("/")
+        return normalized if normalized and normalized != "/" else "/api/v1"
 
     @property
     def cors_origin_list(self) -> List[str]:

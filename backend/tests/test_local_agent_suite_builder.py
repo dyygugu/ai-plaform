@@ -1,5 +1,6 @@
 import json
 import io
+import re
 import subprocess
 import tempfile
 import zipfile
@@ -34,6 +35,8 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
                 "-File",
                 str(script),
                 "-Version",
+                "0.9.1",
+                "-ExtensionVersion",
                 "0.9.1",
                 "-HelperSourceRoot",
                 str(helper_root),
@@ -81,6 +84,7 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
             manifest = json.loads(archive.read("manifest.json").decode("utf-8"))
             default_config = json.loads(archive.read("local-agent/config/default-config.json").decode("utf-8"))
             install_script = archive.read("install/install.ps1").decode("utf-8")
+            start_script = archive.read("local-agent/start-local-agent.ps1").decode("utf-8")
             bundled_extension_manifest = json.loads(
                 archive.read("browser-extension/aidp-score-helper/manifest.json").decode("utf-8")
             )
@@ -154,6 +158,8 @@ def test_build_local_agent_suite_creates_integrated_zip_structure() -> None:
     assert manifest["code_signing"]["thumbprint"]
     assert manifest["install"]["entry"] == "install/install.ps1"
     assert "AIDP 本机助手.exe" in install_script
+    assert "& $helper -Port $Port -HostName $HostName @optionalArgs" in start_script
+    assert "@('-Port', $Port, '-HostName', $HostName)" not in start_script
     assert default_config["platform_base_url"] == "http://192.168.10.149:8789"
     assert default_config["active_platform_url_id"] == "nas-lan"
     assert default_config["platform_urls"] == [
@@ -221,6 +227,62 @@ def test_host_launcher_auto_loads_bundled_extension_for_managed_browsers() -> No
         "aidp-score-helper",
     ]:
         assert token in text
+
+
+def test_host_launcher_uses_platform_api_token_without_echoing_secret() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = repo_root / "local-agent-source" / "host-launcher.ps1"
+
+    text = source.read_text(encoding="utf-8")
+
+    for token in [
+        "platform_api_token",
+        "AIDP_PLATFORM_API_TOKEN",
+        "AIDP_BROWSER_EXTENSION_API_TOKEN",
+        "Get-PlatformApiHeaders",
+        "X-AIDP-API-Token",
+        "ConvertTo-SafeHelperSettings",
+        "platform_api_token_configured",
+        "ConvertFrom-RawJsonObject",
+        "Get-AssistantConfigPayloadMap",
+        "if ($Settings -is [System.Collections.IDictionary])",
+        "$normalizedSettings = @{}",
+        "Set-AssistantConfig -Payload $body -RawJson $bodyText",
+        "Invoke-RestMethod -Uri $sessionUrl -Method POST -Headers (Get-PlatformApiHeaders)",
+        "$sessionBody = @{ token = $Token } | ConvertTo-Json -Compress",
+        "Invoke-JsonPostUtf8 -Uri $url -Headers (Get-PlatformApiHeaders)",
+        "Invoke-WebRequest -Uri $uri -Headers (Get-PlatformApiHeaders)",
+        "param($BaseUrl, $WorkerId, $DisplayName, $Version, $Slots, $StatusPath, $ApiToken)",
+        "'X-AIDP-API-Token' = $ApiToken",
+    ]:
+        assert token in text
+
+    assert "config = Get-HelperSettings" not in text
+
+
+def test_host_launcher_only_maps_ai_provider_codes_for_ai_call_provider_events() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = repo_root / "local-agent-source" / "host-launcher.ps1"
+
+    text = source.read_text(encoding="utf-8")
+
+    assert "param([string]$Event = '', [string]$Message = '', [string]$Stage = '', [string]$Step = '')" in text
+    assert "$isAiProviderCall = $Stage -eq 'ai_draft' -and $Step -eq 'call_provider'" in text
+    assert "if ($isAiProviderCall -and $text -match '502|bad gateway') { return 'AI_PROVIDER_502' }" in text
+    assert "if ($isAiProviderCall -and $text -match 'timeout|timed out|超时') { return 'AI_PROVIDER_TIMEOUT' }" in text
+    assert "Get-AidpWorkerEventErrorCode -Event $Event -Message $Message -Stage $payload.stage -Step $payload.step" in text
+
+
+def test_host_launcher_does_not_embed_ai_api_key() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    source = repo_root / "local-agent-source" / "host-launcher.ps1"
+
+    text = source.read_text(encoding="utf-8")
+
+    assert "AIDP_AI_API_KEY" in text
+    assert "OPENAI_API_KEY" in text
+    assert not re.search(r"\bsk-[A-Za-z0-9_-]{12,}", text)
+    assert "elseif ($env:OPENAI_API_KEY)" in text
 
 
 def test_windows_setup_source_exposes_p1_installer_behaviour() -> None:

@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -92,6 +93,16 @@ def _write_recording(root: Path) -> None:
     (root / "opr-test-capability.json").write_text(json.dumps(document, ensure_ascii=False), encoding="utf-8")
 
 
+def _create_app_with_reloaded_runtime():
+    settings_module = importlib.import_module("app.core.settings")
+    settings_module.get_settings.cache_clear()
+    for module_name in list(sys.modules):
+        if module_name in {"app.main", "app.db.init_db", "app.db.session"} or module_name == "app.api.v1" or module_name.startswith("app.api.v1."):
+            sys.modules.pop(module_name, None)
+    main_module = importlib.import_module("app.main")
+    return main_module.create_app()
+
+
 class TaskCapabilityTests(unittest.TestCase):
     def test_catalog_marks_capability_only_for_matching_recording(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
@@ -101,10 +112,7 @@ class TaskCapabilityTests(unittest.TestCase):
             os.environ["AIDP_PRODUCTION_STATE_PATH"] = str(tmp / "production-state.json")
             os.environ["AIDP_AUTO_CREATE_TABLES"] = "true"
             _write_recording(tmp / "operation-recordings")
-            settings_module = importlib.import_module("app.core.settings")
-            settings_module.get_settings.cache_clear()
-            main_module = importlib.import_module("app.main")
-            app = main_module.create_app()
+            app = _create_app_with_reloaded_runtime()
 
             with TestClient(app) as client:
                 matched = client.post(
@@ -156,13 +164,10 @@ class TaskCapabilityTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
-            settings_module = importlib.import_module("app.core.settings")
-            settings_module.get_settings.cache_clear()
             service_module = importlib.import_module("app.services.task_capability_service")
             learned = service_module._learn_from_recording(tmp / "operation-recordings" / "opr-test-capability.json")
             self.assertEqual(learned["account_user_id"], "account-sample-002")
-            main_module = importlib.import_module("app.main")
-            app = main_module.create_app()
+            app = _create_app_with_reloaded_runtime()
 
             with TestClient(app) as client:
                 seed = client.post(

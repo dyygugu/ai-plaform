@@ -13,7 +13,7 @@ from app.models.worker import Worker, WorkerStatus
 from app.schemas.alerting import AlertEvaluationRequest, AlertEvaluationResponse, AlertIncident, AlertRuleRead, AlertSummaryResponse, SloIndicator, SloSummaryResponse
 from app.services.alert_service import build_alert_message
 from app.services.audit_service import write_audit
-from app.services.notification_service import get_notification_config_status, send_error_notification
+from app.services.notification_service import build_error_notification_text, get_notification_config_status, send_error_notification
 from app.services.observability_service import build_collector_guard
 from app.services.ops_job_service import build_release_gate
 from app.services.task_rules import utc_now
@@ -233,9 +233,10 @@ def evaluate_alerts(db: Session, request: AlertEvaluationRequest) -> AlertEvalua
     slo = build_slo_summary(db)
     incidents = _build_incidents(db, slo)
     status = "passed" if not incidents else _rollup_status([item.severity for item in incidents])
-    preview = _build_notification_preview(status, incidents)
+    preview = _build_notification_preview(status, incidents, trace_id=trace_id)
     audit_trace_id = None
     notification_send = None
+    notification_result_text = ""
     notification_status = get_notification_config_status()
     if request.write_audit:
         severity = _audit_severity(status)
@@ -251,13 +252,17 @@ def evaluate_alerts(db: Session, request: AlertEvaluationRequest) -> AlertEvalua
         audit_trace_id = audit.trace_id
     if request.send_external and incidents:
         notify_event = "alert.evaluation.failed" if status == "failed" else "alert.evaluation.warning"
-        notification_send = send_error_notification(
-            event=notify_event,
-            level="critical" if status == "failed" else "warn",
-            message=f"告警评估发现 {len(incidents)} 条待处理：{incidents[0].title} / {incidents[0].reason}",
-            data={"incidents": [item.model_dump() for item in incidents[:5]], "status": status},
-            trace_id=trace_id,
-        )
+        if request.dry_run:
+            notification_result_text = "\n飞书结果：本次为 dry-run，未发送飞书。 sent=False skipped=True"
+        else:
+            notification_send = send_error_notification(
+                event=notify_event,
+                level="critical" if status == "failed" else "warn",
+                message=f"告警评估发现 {len(incidents)} 条待处理：{incidents[0].title} / {incidents[0].reason}",
+                data={"incidents": [item.model_dump() for item in incidents[:5]], "status": status},
+                trace_id=trace_id,
+            )
+            notification_result_text = _format_notification_result(notification_send)
     return AlertEvaluationResponse(
         trace_id=trace_id,
         generated_at=utc_now(),
@@ -267,9 +272,9 @@ def evaluate_alerts(db: Session, request: AlertEvaluationRequest) -> AlertEvalua
         rules=list_alert_rules(),
         slo=slo,
         incidents=incidents,
-        notification_preview=preview + (_format_notification_result(notification_send) if notification_send else ""),
+        notification_preview=preview + notification_result_text,
         audit_trace_id=audit_trace_id,
-        message="告警评估已完成；飞书通知已按配置处理。" if request.send_external else "告警评估已完成；本次未请求外部发送。",
+        message=_evaluation_message(request),
     )
 
 
@@ -318,27 +323,37 @@ def _incident(key: str, title: str, severity: str, subject: str, reason: str, ac
     return AlertIncident(key=key, title=title, severity=severity, status="open", subject=subject, reason=reason, recommended_action=action, evidence=evidence)
 
 
-def _build_notification_preview(status: str, incidents: list[AlertIncident]) -> str:
+def _build_notification_preview(status: str, incidents: list[AlertIncident], trace_id: str = "") -> str:
     settings = get_settings()
     if incidents:
         first = incidents[0]
-        title = f"AIDP Monitor 告警评估：{len(incidents)} 条待处理"
-        subject = "、".join(item.title for item in incidents[:3])
-        reason = first.reason
-        severity = "critical" if any(item.severity == "critical" for item in incidents) else "warning"
+        notify_event = "alert.evaluation.failed" if status == "failed" else "alert.evaluation.warning"
+        notify_level = "critical" if status == "failed" else "warn"
+        message_text = f"告警评估发现 {len(incidents)} 条待处理：{first.title} / {first.reason}"
+        data = {"incidents": [item.model_dump() for item in incidents[:5]], "status": status}
+        text = build_error_notification_text(notify_event, notify_level, message_text, data, trace_id=trace_id)
     else:
         title = "AIDP Monitor 告警评估：SLO 正常"
         subject = "生产护栏与采集守护"
         reason = "所有本地 SLO 指标通过"
         severity = "info"
-    message = build_alert_message(title, severity, subject, reason, f"{settings.public_base_url}/alerts")
+        message = build_alert_message(title, severity, subject, reason, f"{settings.public_base_url}/alerts")
+        text = message.render_feishu_text()
     notification_status = get_notification_config_status()
     send_state = "已配置，可发送" if notification_status.sends_network else notification_status.message
-    return message.render_feishu_text() + f"\n状态：{status}\n发送：{send_state}"
+    return text + f"\n状态：{status}\n发送：{send_state}"
 
 
 def _format_notification_result(result) -> str:
     return f"\n飞书结果：{result.message} sent={result.sent} skipped={result.skipped}"
+
+
+def _evaluation_message(request: AlertEvaluationRequest) -> str:
+    if not request.send_external:
+        return "告警评估已完成；本次未请求外部发送。"
+    if request.dry_run:
+        return "告警评估已完成；本次为 dry-run，未发送飞书。"
+    return "告警评估已完成；飞书通知已按配置处理。"
 
 
 def _is_real_user_id(value: str) -> bool:

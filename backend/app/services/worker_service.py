@@ -9,6 +9,8 @@ from app.schemas.worker import WorkerApproveRequest, WorkerEventReportRequest, W
 from app.services.notification_service import send_error_notification
 from app.services.task_rules import utc_now
 
+BLOCKED_WORKER_STATUSES = {WorkerStatus.PENDING_APPROVAL, WorkerStatus.REJECTED, WorkerStatus.DISABLED}
+
 
 def ensure_worker(db: Session, worker_id: str) -> Worker:
     worker = db.scalar(select(Worker).where(Worker.worker_id == worker_id))
@@ -59,7 +61,7 @@ def upsert_worker_heartbeat(db: Session, payload: WorkerHeartbeatRequest) -> Wor
     worker.current_account_user_id = payload.current_account_user_id
     worker.current_task_id = payload.current_task_id
     worker.last_error = payload.last_error
-    if worker.status != WorkerStatus.PENDING_APPROVAL:
+    if worker.status not in BLOCKED_WORKER_STATUSES:
         worker.status = WorkerStatus.DEGRADED if payload.last_error else WorkerStatus.ONLINE
     worker.last_heartbeat_at = utc_now()
     add_worker_event(
@@ -78,20 +80,40 @@ def upsert_worker_heartbeat(db: Session, payload: WorkerHeartbeatRequest) -> Wor
 
 def register_worker(db: Session, payload: WorkerRegisterRequest) -> Worker:
     worker = ensure_worker(db, payload.worker_id)
+    previous_status = worker.status
+    was_approved = previous_status in {WorkerStatus.ONLINE, WorkerStatus.DEGRADED} or (
+        previous_status == WorkerStatus.OFFLINE and int(worker.configured_http_account_slots or 0) > 0
+    )
+    is_blocked = previous_status in {WorkerStatus.REJECTED, WorkerStatus.DISABLED}
     worker.display_name = payload.display_name or payload.worker_id
     worker.version = payload.version
-    worker.status = WorkerStatus.PENDING_APPROVAL
     worker.estimated_http_account_slots = max(0, int(payload.estimated_http_account_slots or 0))
-    worker.configured_http_account_slots = 0
-    worker.effective_http_account_slots = 0
-    worker.health_status = "pending_approval"
+    if is_blocked:
+        worker.status = previous_status
+    elif was_approved:
+        worker.status = WorkerStatus.ONLINE
+        worker.health_status = "passed"
+        worker.health_fail_reasons = ""
+        if int(worker.effective_http_account_slots or 0) <= 0:
+            worker.effective_http_account_slots = int(worker.configured_http_account_slots or 0)
+    else:
+        worker.status = WorkerStatus.PENDING_APPROVAL
+        worker.configured_http_account_slots = 0
+        worker.effective_http_account_slots = 0
+        worker.health_status = "pending_approval"
     worker.last_heartbeat_at = utc_now()
     add_worker_event(
         db,
         worker.worker_id,
         WorkerEventType.HEARTBEAT,
         target_version=worker.version,
-        message="Worker 主动注册，等待人工批准",
+        message=(
+            "Worker 主动注册，保持已批准状态"
+            if was_approved
+            else "Worker 主动注册，但当前已禁用或拒绝"
+            if is_blocked
+            else "Worker 主动注册，等待人工批准"
+        ),
     )
     db.flush()
     return worker
@@ -186,7 +208,8 @@ def report_worker_event(db: Session, payload: WorkerEventReportRequest) -> tuple
     message = _serialize_worker_event_message(payload)
     if payload.severity in {"error", "critical"}:
         worker.last_error = _human_worker_event_message(payload)
-        worker.status = WorkerStatus.DEGRADED
+        if worker.status not in BLOCKED_WORKER_STATUSES:
+            worker.status = WorkerStatus.DEGRADED
     event = add_worker_event(
         db,
         payload.worker_id,

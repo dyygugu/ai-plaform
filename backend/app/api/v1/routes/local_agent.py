@@ -84,6 +84,11 @@ def _file_size(path: Path) -> int:
     return path.stat().st_size if path.is_file() else 0
 
 
+def _download_url(path: str) -> str:
+    prefix = str(get_settings().api_prefix or "/api/v1").rstrip("/") or "/api/v1"
+    return f"{prefix}/local-agent/releases/latest/{path.lstrip('/')}"
+
+
 def _download_file(path: Path, media_type: str = "application/zip") -> FileResponse:
     root = _release_root().resolve()
     resolved = path.resolve()
@@ -112,31 +117,31 @@ def read_local_agent_latest_release() -> LocalAgentReleaseRead:
         suite_version=suite_version,
         suite=LocalAgentReleasePackageRead(
             package_name=suite.name,
-            download_url="/api/v1/local-agent/releases/latest/download-suite",
+            download_url=_download_url("download-suite"),
             sha256=_file_sha256(suite),
             size_bytes=_file_size(suite),
         ),
         local_agent=LocalAgentComponentReleaseRead(
             version=suite_version,
-            download_url="/api/v1/local-agent/releases/latest/download-agent",
+            download_url=_download_url("download-agent"),
             sha256=_file_sha256(agent),
             size_bytes=_file_size(agent),
         ),
         windows_launcher=LocalAgentComponentReleaseRead(
             version=suite_version,
-            download_url="/api/v1/local-agent/releases/latest/download-suite",
+            download_url=_download_url("download-suite"),
             sha256=_file_sha256(suite),
             size_bytes=_file_size(suite),
         ),
         windows_installer=LocalAgentComponentReleaseRead(
             version=_release_version_from_installer(installer),
-            download_url="/api/v1/local-agent/releases/latest/download-installer",
+            download_url=_download_url("download-installer"),
             sha256=_file_sha256(installer),
             size_bytes=_file_size(installer),
         ),
         browser_extension=LocalAgentComponentReleaseRead(
             version=_release_version_from_extension(extension),
-            download_url="/api/v1/local-agent/releases/latest/download-extension",
+            download_url=_download_url("download-extension"),
             sha256=_file_sha256(extension),
             size_bytes=_file_size(extension),
         ),

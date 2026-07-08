@@ -1,5 +1,6 @@
 import json
-from datetime import datetime, timezone
+import threading
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import quote
@@ -19,6 +20,8 @@ from app.services.task_rules import utc_now
 TASK_PAGE_URL = "https://aidp.juejin.cn/operation/task-v2?org=AIDP%20Coding&page=1"
 PERSONAL_CENTER_URL = "https://aidp.juejin.cn/operation/lite/setting/account/personal-center?org=AIDP%20Coding&tab=2"
 OPEN_SESSION_FILE = "browser-open-sessions.json"
+OPEN_SESSION_TTL_SECONDS = 300
+_OPEN_SESSION_LOCK = threading.Lock()
 
 
 def build_production_dashboard(db: Session) -> ProductionDashboardSummary:
@@ -82,23 +85,29 @@ def create_browser_open_session(user_id: str, target: str) -> dict[str, Any]:
         raise ValueError("该账号没有可注入 Cookie，请先重新登录并同步。")
     target_url = PERSONAL_CENTER_URL if target == "personal" else TASK_PAGE_URL
     token = uuid4().hex
-    data = _read_open_session_store()
-    data[token] = {
-        "ok": True,
-        "userId": user_id,
-        "target": target,
-        "targetUrl": target_url,
-        "cookie": cookie,
-        "createdAt": utc_now().isoformat(),
-    }
-    _write_open_session_store(data)
-    return data[token] | {"token": token}
+    with _OPEN_SESSION_LOCK:
+        data = _prune_expired_open_sessions(_read_open_session_store())
+        data[token] = {
+            "ok": True,
+            "userId": user_id,
+            "target": target,
+            "targetUrl": target_url,
+            "cookie": cookie,
+            "createdAt": utc_now().isoformat(),
+            "expiresAt": (utc_now() + timedelta(seconds=OPEN_SESSION_TTL_SECONDS)).isoformat(),
+        }
+        _write_open_session_store(data)
+        return data[token] | {"token": token}
 
 
 def get_browser_open_session(token: str) -> dict[str, Any]:
-    data = _read_open_session_store()
-    session = data.get(token)
-    if not session:
+    with _OPEN_SESSION_LOCK:
+        data = _read_open_session_store()
+        session = data.pop(str(token or ""), None)
+        _write_open_session_store(_prune_expired_open_sessions(data))
+    if not isinstance(session, dict):
+        return {"ok": False, "error": "打开令牌不存在或已过期"}
+    if _open_session_expired(session):
         return {"ok": False, "error": "打开令牌不存在或已过期"}
     return session
 
@@ -171,6 +180,33 @@ def _write_open_session_store(data: dict[str, Any]) -> None:
     path = _open_session_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
+def _prune_expired_open_sessions(data: dict[str, Any]) -> dict[str, Any]:
+    return {key: value for key, value in data.items() if isinstance(value, dict) and not _open_session_expired(value)}
+
+
+def _open_session_expired(session: dict[str, Any]) -> bool:
+    expires_at = _parse_datetime(session.get("expiresAt"))
+    if expires_at is not None:
+        return expires_at <= utc_now()
+    created_at = _parse_datetime(session.get("createdAt"))
+    if created_at is None:
+        return True
+    return created_at + timedelta(seconds=OPEN_SESSION_TTL_SECONDS) <= utc_now()
+
+
+def _parse_datetime(value: Any) -> Optional[datetime]:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
 
 
 def _open_session_path() -> Path:
@@ -365,9 +401,9 @@ def _task_page_url(source: dict[str, Any]) -> str:
 
 def _host_open_url(user_id: str, target: str) -> str:
     settings = get_settings()
-    token_seed = f"{user_id}:{target}"
-    # token is created lazily by /api/v1/accounts/{user_id}/open-target/{target}; this URL is the user-facing action endpoint.
-    return f"{settings.public_base_url.rstrip('/')}/api/v1/accounts/{quote(user_id)}/open-target/{quote(target)}"
+    api_prefix = str(settings.api_prefix or "/api/v1").rstrip("/") or "/api/v1"
+    # token is created lazily by {api_prefix}/accounts/{user_id}/open-target/{target}; this URL is the user-facing action endpoint.
+    return f"{settings.public_base_url.rstrip('/')}{api_prefix}/accounts/{quote(user_id)}/open-target/{quote(target)}"
 
 
 def _host_profile_url(user_id: str, source: dict[str, Any]) -> str:

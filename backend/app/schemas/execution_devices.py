@@ -91,20 +91,20 @@ class LocalAgentReleaseRead(BaseModel):
     suite: LocalAgentReleasePackageRead = Field(
         default_factory=lambda: LocalAgentReleasePackageRead(
             package_name="aidp-local-suite-0.9.1.zip",
-            download_url="/api/v1/local-agent/releases/latest/download-suite",
+            download_url="/local-agent/releases/latest/download-suite",
         )
     )
     local_agent: LocalAgentComponentReleaseRead = Field(
-        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-agent")
+        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/local-agent/releases/latest/download-agent")
     )
     windows_launcher: LocalAgentComponentReleaseRead = Field(
-        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-suite")
+        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/local-agent/releases/latest/download-suite")
     )
     windows_installer: LocalAgentComponentReleaseRead = Field(
-        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-installer")
+        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/local-agent/releases/latest/download-installer")
     )
     browser_extension: LocalAgentComponentReleaseRead = Field(
-        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/api/v1/local-agent/releases/latest/download-extension")
+        default_factory=lambda: LocalAgentComponentReleaseRead(download_url="/local-agent/releases/latest/download-extension")
     )
     release_notes: list[str] = Field(default_factory=list)
     mandatory: bool = False

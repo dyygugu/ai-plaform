@@ -1,15 +1,19 @@
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
+import json
 from pathlib import Path
 import re
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 from app.api.v1.router import api_router
+from app.core.security import auth_required, require_api_auth
 from app.core.settings import get_settings
 from app.db.init_db import create_tables_for_dev
 from app.db.session import SessionLocal, get_db
@@ -24,6 +28,10 @@ from app.services.production_dashboard_service import get_browser_open_session
 from app.services.task_auto_run_service import default_task_auto_run_adapters
 from app.services.task_auto_run_worker_service import GenericTaskAutoRunWorkerRegistry
 from sqlalchemy.orm import Session
+
+
+class BrowserOpenSessionConsumeRequest(BaseModel):
+    token: str
 
 
 @asynccontextmanager
@@ -98,8 +106,8 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="aidp-monitor-next",
         version=settings.monitor_version,
-        docs_url=f"{settings.api_prefix}/docs",
-        openapi_url=f"{settings.api_prefix}/openapi.json",
+        docs_url=None if auth_required(settings) else f"{settings.api_prefix}/docs",
+        openapi_url=None if auth_required(settings) else f"{settings.api_prefix}/openapi.json",
         lifespan=lifespan,
     )
     app.add_middleware(
@@ -125,24 +133,51 @@ def create_app() -> FastAPI:
         )
         return JSONResponse(status_code=500, content={"detail": "服务内部错误，已记录并按配置发送飞书通知。", "trace_id": trace_id})
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        details = [
+            {key: value for key, value in error.items() if key != "input"}
+            for error in exc.errors()
+        ]
+        return JSONResponse(status_code=422, content={"detail": details})
 
-    @app.get("/api/browser-open-session", include_in_schema=False)
+
+    @app.get("/api/browser-open-session", include_in_schema=False, dependencies=[Depends(require_api_auth)])
     def consume_browser_open_session(token: str) -> dict:
         return get_browser_open_session(token)
 
-    @app.post("/api/client-session", response_model=AccountClientSessionResponse)
+    @app.post("/api/browser-open-session", include_in_schema=False, dependencies=[Depends(require_api_auth)])
+    def consume_browser_open_session_post(payload: BrowserOpenSessionConsumeRequest) -> dict:
+        return get_browser_open_session(payload.token)
+
+    @app.post("/api/client-session", response_model=AccountClientSessionResponse, dependencies=[Depends(require_api_auth)])
     def register_client_session_compat(payload: AccountClientSessionRequest, db: Session = Depends(get_db)) -> AccountClientSessionResponse:
         try:
             return register_client_session(db, payload)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    @app.get("/aidp-runtime-config.js", include_in_schema=False)
+    def frontend_runtime_config() -> Response:
+        api_prefix = str(settings.api_prefix or "/api/v1").rstrip("/") or "/api/v1"
+        return Response(
+            content=f"window.__AIDP_API_PREFIX__ = {json.dumps(api_prefix, ensure_ascii=False)};\n",
+            media_type="application/javascript",
+        )
+
     static_dir = Path(__file__).resolve().parent.parent / "frontend_dist"
     if static_dir.exists():
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="frontend-assets")
 
         @app.get("/{full_path:path}", include_in_schema=False)
         def serve_frontend(full_path: str) -> FileResponse:
-            if full_path == "api" or full_path.startswith("api/"):
+            api_prefix_path = str(settings.api_prefix or "/api/v1").strip("/")
+            if (
+                full_path == "api"
+                or full_path.startswith("api/")
+                or full_path == api_prefix_path
+                or full_path.startswith(f"{api_prefix_path}/")
+            ):
                 raise HTTPException(status_code=404, detail="Not Found")
             requested_path = static_dir / full_path
             if full_path and requested_path.is_file():

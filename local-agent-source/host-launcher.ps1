@@ -27,10 +27,11 @@ if ($script:PowerShellMajor -lt 5) {
 function New-Utf8NoBomEncoding { New-Object System.Text.UTF8Encoding($false) }
 
 function Get-AidpWorkerEventErrorCode {
-  param([string]$Event = '', [string]$Message = '')
+  param([string]$Event = '', [string]$Message = '', [string]$Stage = '', [string]$Step = '')
   $text = (([string]$Event) + ' ' + ([string]$Message)).ToLowerInvariant()
-  if ($text -match '502|bad gateway') { return 'AI_PROVIDER_502' }
-  if ($text -match 'timeout|timed out|超时') { return 'AI_PROVIDER_TIMEOUT' }
+  $isAiProviderCall = $Stage -eq 'ai_draft' -and $Step -eq 'call_provider'
+  if ($isAiProviderCall -and $text -match '502|bad gateway') { return 'AI_PROVIDER_502' }
+  if ($isAiProviderCall -and $text -match 'timeout|timed out|超时') { return 'AI_PROVIDER_TIMEOUT' }
   'WORKER_EXCEPTION'
 }
 
@@ -48,7 +49,7 @@ function Invoke-AidpWorkerEventReport {
       message = $Message
       error_detail = $Event
     }
-    if ($severity -ne 'info') { $payload.error_code = Get-AidpWorkerEventErrorCode -Event $Event -Message $Message; $payload.retryable = $true }
+    if ($severity -ne 'info') { $payload.error_code = Get-AidpWorkerEventErrorCode -Event $Event -Message $Message -Stage $payload.stage -Step $payload.step; $payload.retryable = $true }
     if ($null -ne $Data) { $payload.context = $Data }
     Invoke-PlatformApi -Method 'POST' -Path '/workers/events' -Payload $payload -TimeoutSec 2 | Out-Null
   } catch {}
@@ -148,6 +149,47 @@ function ConvertFrom-JsonCompat {
       return ConvertTo-PlainHashtable ($safeText | ConvertFrom-Json)
     }
     throw
+  }
+}
+
+function ConvertFrom-SystemTextJsonElement {
+  param($Element)
+  $kind = $Element.ValueKind.ToString()
+  if ($kind -eq 'Object') {
+    $result = @{}
+    foreach ($property in $Element.EnumerateObject()) {
+      $result[$property.Name] = ConvertFrom-SystemTextJsonElement $property.Value
+    }
+    return $result
+  }
+  if ($kind -eq 'Array') {
+    $items = @()
+    foreach ($item in $Element.EnumerateArray()) {
+      $items += ,(ConvertFrom-SystemTextJsonElement $item)
+    }
+    return $items
+  }
+  if ($kind -eq 'String') { return $Element.GetString() }
+  if ($kind -eq 'Number') {
+    $longValue = 0L
+    if ($Element.TryGetInt64([ref]$longValue)) { return $longValue }
+    return $Element.GetDouble()
+  }
+  if ($kind -eq 'True') { return $true }
+  if ($kind -eq 'False') { return $false }
+  $null
+}
+
+function ConvertFrom-RawJsonObject {
+  param([string]$Json)
+  if (-not $Json) { return $null }
+  try {
+    Add-Type -AssemblyName System.Text.Json -ErrorAction SilentlyContinue
+    $document = [System.Text.Json.JsonDocument]::Parse($Json)
+    try { return ConvertFrom-SystemTextJsonElement $document.RootElement }
+    finally { $document.Dispose() }
+  } catch {
+    return $null
   }
 }
 
@@ -319,7 +361,7 @@ function Save-AiScoreDebugScreenshots {
 }
 
 function Get-AiScoreConfig {
-  $apiKey = if ($env:AIDP_AI_API_KEY) { [string]$env:AIDP_AI_API_KEY } else { 'sk-0Bp78XGfQKfW9atAZ' }
+  $apiKey = if ($env:AIDP_AI_API_KEY) { [string]$env:AIDP_AI_API_KEY } elseif ($env:OPENAI_API_KEY) { [string]$env:OPENAI_API_KEY } else { '' }
   $baseUrl = if ($env:AIDP_AI_BASE_URL) { [string]$env:AIDP_AI_BASE_URL } else { 'http://api.51gugu.uk/v1' }
   $model = if ($env:AIDP_AI_MODEL) { [string]$env:AIDP_AI_MODEL } else { 'gpt-5.4-mini' }
   [ordered]@{ configured = [bool]($apiKey -and $model); hasApiKey = [bool]$apiKey; baseUrl = $baseUrl; model = $model; provider = 'openai-compatible' }
@@ -417,7 +459,7 @@ function Invoke-AiScoreAnalysis {
   param($Body)
   $requestTimer = [Diagnostics.Stopwatch]::StartNew()
   $config = Get-AiScoreConfig
-  $apiKey = if ($env:AIDP_AI_API_KEY) { [string]$env:AIDP_AI_API_KEY } else { 'sk-0Bp78XGfQKfW9atAZ' }
+  $apiKey = if ($env:AIDP_AI_API_KEY) { [string]$env:AIDP_AI_API_KEY } elseif ($env:OPENAI_API_KEY) { [string]$env:OPENAI_API_KEY } else { '' }
   if (-not $apiKey) { throw 'AIDP_AI_API_KEY or OPENAI_API_KEY is not configured.' }
   $model = if ($Body.model) { [string]$Body.model } else { [string]$config.model }
   if (-not $model) { throw 'AIDP_AI_MODEL is not configured and request model is empty.' }
@@ -755,6 +797,21 @@ function Get-AssistantConsoleHtml {
             </div>
           </div>
           <div class="panel">
+            <h3>平台 API Token</h3>
+            <p id="platformTokenStatus" class="hint">当前状态：读取中</p>
+            <p class="muted">平台开启鉴权后，本机助手上传学习包、同步 Cookie、打开任务页都需要这个 Token。Token 只保存在当前电脑，不会显示在技术日志里。</p>
+            <div class="form-grid" style="margin-top:12px;">
+              <div class="field">
+                <label>API Token</label>
+                <input id="platformApiToken" type="password" autocomplete="off" placeholder="留空不修改；输入新 Token 后保存">
+              </div>
+              <div class="row">
+                <button onclick="savePlatformToken()">保存 Token</button>
+                <button class="secondary" onclick="clearPlatformToken()">清除 Token</button>
+              </div>
+            </div>
+          </div>
+          <div class="panel">
             <h3>本机助手访问地址</h3>
             <p style="font-size:18px;font-weight:700;">http://127.0.0.1:8790</p>
             <p class="muted">这是本机助手在当前电脑上的访问地址，浏览器插件会连接这里。一般不需要修改。</p>
@@ -1020,6 +1077,8 @@ function Get-AssistantConsoleHtml {
     }
     function renderAddresses() {
       document.getElementById('currentPlatformUrl').textContent = currentUrl();
+      const tokenStatus = document.getElementById('platformTokenStatus');
+      if (tokenStatus) tokenStatus.textContent = state.config?.platform_api_token_configured ? '当前状态：已配置 Token' : '当前状态：未配置 Token';
       const activeId = activeAddressId();
       document.getElementById('addressRows').innerHTML = platformAddresses().map(item => {
         const current = item.id === activeId || item.url === currentUrl();
@@ -1112,6 +1171,25 @@ function Get-AssistantConsoleHtml {
       cfg[keyForCurrentUrl()] = 'http://192.168.10.149:8789';
       await saveConfig(cfg, '已恢复默认平台地址。');
     }
+    async function savePlatformToken() {
+      const input = document.getElementById('platformApiToken');
+      const token = String(input?.value || '').trim();
+      if (!token) { toast('请输入新的 API Token；如需清除请点击“清除 Token”。'); return; }
+      const cfg = JSON.parse(JSON.stringify(state.config || {}));
+      cfg.platform_api_token = token;
+      const data = await saveConfig(cfg, 'API Token 已保存。');
+      if (input) input.value = '';
+      state.config = data.config || state.config;
+      renderAddresses();
+    }
+    async function clearPlatformToken() {
+      if (!confirm('确认清除本机助手保存的平台 API Token 吗？清除后学习包上传、Cookie 同步和打开任务页可能失败。')) return;
+      const cfg = JSON.parse(JSON.stringify(state.config || {}));
+      cfg.platform_api_token = '';
+      const data = await saveConfig(cfg, 'API Token 已清除。');
+      state.config = data.config || state.config;
+      renderAddresses();
+    }
     async function testPlatformUrl(url, silent) {
       const data = await api('/api/assistant/test-platform-connection', { method: 'POST', body: JSON.stringify({ platform_url: url }) });
       if (!silent) toast(data.ok ? '连接成功，可以正常访问 NAS 平台。' : '连接失败：当前电脑无法访问平台，请检查平台网址是否正确。');
@@ -1124,7 +1202,7 @@ function Get-AssistantConsoleHtml {
       window.open(url, '_blank');
     }
     function openDevicePage() {
-      window.open(currentUrl().replace(/\/+$/, '') + '/execution-devices', '_blank');
+      window.open(currentUrl().replace(/\/+$/, '') + '/workers', '_blank');
     }
     async function loadAutostart() {
       const data = await api('/api/assistant/autostart');
@@ -1286,6 +1364,8 @@ function Get-DefaultPlatformUrls {
 function Get-DefaultHelperSettings {
   $settings = @{
     platform_base_url = if ($env:AIDP_PLATFORM_BASE_URL) { [string]$env:AIDP_PLATFORM_BASE_URL } else { 'http://192.168.10.149:8789' }
+    platform_api_prefix = if ($env:AIDP_PLATFORM_API_PREFIX) { [string]$env:AIDP_PLATFORM_API_PREFIX } elseif ($env:AIDP_API_PREFIX) { [string]$env:AIDP_API_PREFIX } else { '/api/v1' }
+    platform_api_token = if ($env:AIDP_PLATFORM_API_TOKEN) { [string]$env:AIDP_PLATFORM_API_TOKEN } elseif ($env:AIDP_BROWSER_EXTENSION_API_TOKEN) { [string]$env:AIDP_BROWSER_EXTENSION_API_TOKEN } else { '' }
     active_platform_url_id = if ($env:AIDP_PLATFORM_BASE_URL) { 'custom-env' } else { 'nas-lan' }
     platform_urls = @(Get-DefaultPlatformUrls)
     agent_port = 8790
@@ -1319,16 +1399,16 @@ function New-PlatformUrlId {
 
 function Normalize-AssistantSettings {
   param($Settings)
-  $settings = @{}
-  if ($Settings -and $Settings.PSObject.Properties['Keys']) {
-    foreach ($key in @($Settings.Keys)) { $settings[[string]$key] = Get-MapValue $Settings ([string]$key) }
-  } elseif ($Settings -is [System.Collections.IDictionary]) {
-    foreach ($key in @($Settings.Keys)) { $settings[$key] = $Settings[$key] }
+  $normalizedSettings = @{}
+  if ($Settings -is [System.Collections.IDictionary]) {
+    foreach ($key in @($Settings.Keys)) { $normalizedSettings[$key] = $Settings[$key] }
+  } elseif ($Settings -and $Settings.PSObject.Properties['Keys']) {
+    foreach ($key in @($Settings.Keys)) { $normalizedSettings[[string]$key] = Get-MapValue $Settings ([string]$key) }
   } elseif ($Settings) {
-    foreach ($property in $Settings.PSObject.Properties) { $settings[$property.Name] = $property.Value }
+    foreach ($property in $Settings.PSObject.Properties) { $normalizedSettings[$property.Name] = $property.Value }
   }
 
-  $rawUrls = Get-MapValue $settings 'platform_urls'
+  $rawUrls = Get-MapValue $normalizedSettings 'platform_urls'
   $urls = @()
   $seenIds = @{}
   $seenUrls = @{}
@@ -1352,17 +1432,17 @@ function Normalize-AssistantSettings {
   }
   if (-not @($urls).Count) { $urls = @(Get-DefaultPlatformUrls) }
 
-  $currentUrl = Normalize-PlatformUrlText ([string](Get-MapValue $settings 'platform_base_url'))
-  $activeId = ([string](Get-MapValue $settings 'active_platform_url_id')).Trim()
+  $currentUrl = Normalize-PlatformUrlText ([string](Get-MapValue $normalizedSettings 'platform_base_url'))
+  $activeId = ([string](Get-MapValue $normalizedSettings 'active_platform_url_id')).Trim()
   $active = $null
   if ($activeId) { $active = @($urls | Where-Object { [string](Get-MapValue $_ 'id') -eq $activeId } | Select-Object -First 1)[0] }
   if (-not $active -and $currentUrl) { $active = @($urls | Where-Object { (Normalize-PlatformUrlText ([string](Get-MapValue $_ 'url'))) -eq $currentUrl } | Select-Object -First 1)[0] }
   if (-not $active) { $active = @($urls | Where-Object { [string](Get-MapValue $_ 'id') -eq 'nas-lan' } | Select-Object -First 1)[0] }
   if (-not $active) { $active = $urls[0] }
 
-  $settings['platform_urls'] = @($urls)
-  $settings['active_platform_url_id'] = [string](Get-MapValue $active 'id')
-  $settings['platform_base_url'] = [string](Get-MapValue $active 'url')
+  $normalizedSettings['platform_urls'] = @($urls)
+  $normalizedSettings['active_platform_url_id'] = [string](Get-MapValue $active 'id')
+  $normalizedSettings['platform_base_url'] = [string](Get-MapValue $active 'url')
   $fallbackSettings = @{
     agent_port = 8790
     worker_runtime_enabled = $true
@@ -1377,11 +1457,13 @@ function Normalize-AssistantSettings {
     recording_upload_timeout_sec = 20
   }
   foreach ($key in @($fallbackSettings.Keys)) {
-    if (-not $settings.ContainsKey($key) -or $null -eq $settings[$key] -or [string]$settings[$key] -eq '') {
-      $settings[$key] = $fallbackSettings[$key]
+    if (-not $normalizedSettings.ContainsKey($key) -or $null -eq $normalizedSettings[$key] -or [string]$normalizedSettings[$key] -eq '') {
+      $normalizedSettings[$key] = $fallbackSettings[$key]
     }
   }
-  $settings
+  if (-not $normalizedSettings.ContainsKey('platform_api_token')) { $normalizedSettings['platform_api_token'] = '' }
+  if (-not $normalizedSettings.ContainsKey('platform_api_prefix')) { $normalizedSettings['platform_api_prefix'] = '/api/v1' }
+  $normalizedSettings
 }
 
 function Get-HelperSettings {
@@ -1393,6 +1475,33 @@ function Get-HelperSettings {
     if ($null -ne $value -and [string]$value -ne '') { $defaults[$key] = $value }
   }
   Normalize-AssistantSettings -Settings $defaults
+}
+
+function Get-PlatformApiToken {
+  param($Settings = $null)
+  $settings = if ($Settings) { $Settings } else { Get-HelperSettings }
+  $token = ([string](Get-MapValue $settings 'platform_api_token')).Trim()
+  if (-not $token -and $env:AIDP_PLATFORM_API_TOKEN) { $token = ([string]$env:AIDP_PLATFORM_API_TOKEN).Trim() }
+  if (-not $token -and $env:AIDP_BROWSER_EXTENSION_API_TOKEN) { $token = ([string]$env:AIDP_BROWSER_EXTENSION_API_TOKEN).Trim() }
+  $token
+}
+
+function Get-PlatformApiHeaders {
+  param($Settings = $null)
+  $headers = @{}
+  $token = Get-PlatformApiToken -Settings $Settings
+  if ($token) { $headers['X-AIDP-API-Token'] = $token }
+  $headers
+}
+
+function ConvertTo-SafeHelperSettings {
+  param($Settings)
+  $safe = ConvertTo-PlainHashtable $Settings
+  if ($safe -is [System.Collections.IDictionary]) {
+    if ($safe.ContainsKey('platform_api_token')) { $safe.Remove('platform_api_token') }
+    $safe['platform_api_token_configured'] = [bool](Get-PlatformApiToken -Settings $Settings)
+  }
+  $safe
 }
 
 function Get-OperationRecordingQueueRoot {
@@ -1484,11 +1593,12 @@ function Invoke-OperationRecordingPlatformUpload {
   if (-not $baseUrl) {
     return [ordered]@{ ok = $false; error = 'helper-settings.json 或环境变量缺少 platform_base_url / AIDP_PLATFORM_BASE_URL。'; platform_base_url = '' }
   }
-  $uri = $baseUrl + '/api/v1/operation-recordings'
+  $uri = (Get-PlatformApiBaseUrl) + '/operation-recordings'
   $timeoutSec = [Math]::Max(5, [int](Get-MapValue $settings 'recording_upload_timeout_sec'))
   try {
     $jsonBody = (ConvertTo-PlainHashtable $Payload) | ConvertTo-Json -Depth 80 -Compress
-    $response = Invoke-RestMethod -Uri $uri -Method POST -Body $jsonBody -ContentType 'application/json;charset=UTF-8' -TimeoutSec $timeoutSec
+    $headers = Get-PlatformApiHeaders -Settings $settings
+    $response = Invoke-RestMethod -Uri $uri -Method POST -Headers $headers -Body $jsonBody -ContentType 'application/json;charset=UTF-8' -TimeoutSec $timeoutSec
     return [ordered]@{ ok = $true; response = (ConvertTo-PlainHashtable $response); platform_base_url = $baseUrl; uri = $uri }
   } catch {
     return [ordered]@{ ok = $false; error = $_.Exception.Message; platform_base_url = $baseUrl; uri = $uri }
@@ -1601,11 +1711,26 @@ function Get-WorkerRuntimeStatusPath {
   Join-Path (Get-AssistantStateRoot) 'worker-runtime-status.json'
 }
 
+function Get-PlatformApiPrefix {
+  param($Settings = $null)
+  $settings = if ($Settings) { $Settings } else { Get-HelperSettings }
+  $prefix = ([string](Get-MapValue $settings 'platform_api_prefix')).Trim()
+  if (-not $prefix -and $env:AIDP_PLATFORM_API_PREFIX) { $prefix = ([string]$env:AIDP_PLATFORM_API_PREFIX).Trim() }
+  if (-not $prefix -and $env:AIDP_API_PREFIX) { $prefix = ([string]$env:AIDP_API_PREFIX).Trim() }
+  if (-not $prefix) { $prefix = '/api/v1' }
+  if (-not $prefix.StartsWith('/')) { $prefix = '/' + $prefix }
+  $prefix = $prefix -replace '/+', '/'
+  if ($prefix.Length -gt 1) { $prefix = $prefix.TrimEnd('/') }
+  if (-not $prefix -or $prefix -eq '/') { $prefix = '/api/v1' }
+  $prefix
+}
+
 function Get-PlatformApiBaseUrl {
   $settings = Get-HelperSettings
   $baseUrl = ([string](Get-MapValue $settings 'platform_base_url')).Trim().TrimEnd('/')
   if (-not $baseUrl) { throw 'helper-settings.json 缺少 platform_base_url。' }
-  if ($baseUrl -notmatch '/api/v1$') { $baseUrl = $baseUrl + '/api/v1' }
+  $prefix = Get-PlatformApiPrefix -Settings $settings
+  if (-not $baseUrl.EndsWith($prefix)) { $baseUrl = $baseUrl + $prefix }
   $baseUrl
 }
 
@@ -1618,6 +1743,7 @@ function Invoke-PlatformApi {
     Uri = $uri
     Method = $Method
     TimeoutSec = $TimeoutSec
+    Headers = Get-PlatformApiHeaders
   }
   if ($null -ne $Payload) {
     $parameters.Body = ((ConvertTo-PlainHashtable $Payload) | ConvertTo-Json -Depth 80 -Compress)
@@ -1630,18 +1756,39 @@ function Get-AssistantConfig {
   [ordered]@{
     ok = $true
     config_path = Get-HelperSettingsPath
-    config = Get-HelperSettings
+    config = ConvertTo-SafeHelperSettings (Get-HelperSettings)
   }
 }
 
+function Get-AssistantConfigPayloadMap {
+  param($Payload, [string]$RawJson = '')
+  $payloadMap = ConvertTo-PlainHashtable $Payload
+  $knownKeys = @('platform_base_url', 'platform_api_prefix', 'platform_api_token', 'active_platform_url_id', 'platform_urls', 'agent_port', 'worker_runtime_enabled', 'worker_id', 'worker_display_name', 'worker_estimated_http_account_slots', 'plugin_bridge_enabled', 'upload_queue_enabled', 'auto_update_enabled', 'recording_upload_retry_count', 'recording_upload_timeout_sec')
+  $hasKnownKey = $false
+  foreach ($key in $knownKeys) {
+    if ($null -ne (Get-MapValue $payloadMap $key)) {
+      $hasKnownKey = $true
+      break
+    }
+  }
+  if (-not $hasKnownKey -and $RawJson) {
+    $rawMap = ConvertFrom-RawJsonObject $RawJson
+    if ($rawMap) { $payloadMap = $rawMap }
+  }
+  $configPayload = Get-MapValue $payloadMap 'config'
+  if ($configPayload -is [System.Collections.IDictionary]) { return $configPayload }
+  $payloadMap
+}
+
 function Set-AssistantConfig {
-  param($Payload)
+  param($Payload, [string]$RawJson = '')
   $current = Get-HelperSettings
-  foreach ($key in @('platform_base_url', 'active_platform_url_id', 'platform_urls', 'agent_port', 'worker_runtime_enabled', 'worker_id', 'worker_display_name', 'worker_estimated_http_account_slots', 'plugin_bridge_enabled', 'upload_queue_enabled', 'auto_update_enabled', 'recording_upload_retry_count', 'recording_upload_timeout_sec')) {
-    $value = Get-MapValue $Payload $key
+  $payloadMap = Get-AssistantConfigPayloadMap -Payload $Payload -RawJson $RawJson
+  foreach ($key in @('platform_base_url', 'platform_api_prefix', 'platform_api_token', 'active_platform_url_id', 'platform_urls', 'agent_port', 'worker_runtime_enabled', 'worker_id', 'worker_display_name', 'worker_estimated_http_account_slots', 'plugin_bridge_enabled', 'upload_queue_enabled', 'auto_update_enabled', 'recording_upload_retry_count', 'recording_upload_timeout_sec')) {
+    $value = Get-MapValue $payloadMap $key
     if ($null -ne $value) {
       if ($value -is [string]) {
-        if ([string]$value -ne '') { $current[$key] = $value }
+        if ($key -eq 'platform_api_token' -or [string]$value -ne '') { $current[$key] = $value }
       } else {
         $current[$key] = $value
       }
@@ -1649,7 +1796,7 @@ function Set-AssistantConfig {
   }
   $current = Normalize-AssistantSettings -Settings $current
   Write-JsonFile -Path (Get-HelperSettingsPath) -Data $current
-  [ordered]@{ ok = $true; config_path = Get-HelperSettingsPath; config = $current }
+  [ordered]@{ ok = $true; config_path = Get-HelperSettingsPath; config = ConvertTo-SafeHelperSettings $current }
 }
 
 function Test-PlatformConnection {
@@ -1666,7 +1813,8 @@ function Test-PlatformConnection {
     if ($temporary) {
       $baseUrl = (Normalize-PlatformUrlText $PlatformUrl)
       if (-not $baseUrl -or $baseUrl -notmatch '^https?://') { throw '平台网址格式不正确。' }
-      if ($baseUrl -notmatch '/api/v1$') { $baseUrl = $baseUrl + '/api/v1' }
+      $prefix = Get-PlatformApiPrefix -Settings $settings
+      if (-not $baseUrl.EndsWith($prefix)) { $baseUrl = $baseUrl + $prefix }
       $health = Invoke-RestMethod -Uri ($baseUrl + '/health') -Method GET -TimeoutSec 8
       [ordered]@{ ok = $true; platform_base_url = (Normalize-PlatformUrlText $PlatformUrl); response = ConvertTo-PlainHashtable $health; message = '连接成功，可以正常访问平台。' }
     } else {
@@ -1995,11 +2143,12 @@ function Save-ReleaseDownload {
     }
   }
   $baseUrl = Get-PlatformApiBaseUrl
-  $rootBase = $baseUrl -replace '/api/v1$', ''
+  $prefix = Get-PlatformApiPrefix
+  $rootBase = if ($baseUrl.EndsWith($prefix)) { $baseUrl.Substring(0, $baseUrl.Length - $prefix.Length) } else { $baseUrl }
   $uri = if ($downloadUrl -match '^https?://') { $downloadUrl } else { $rootBase.TrimEnd('/') + $downloadUrl }
   $target = Get-DownloadedFilePath -PackageName $packageName
   try {
-    Invoke-WebRequest -Uri $uri -OutFile $target -TimeoutSec 30 | Out-Null
+    Invoke-WebRequest -Uri $uri -Headers (Get-PlatformApiHeaders) -OutFile $target -TimeoutSec 30 | Out-Null
     [ordered]@{ downloaded = $true; path = $target; error = '' }
   } catch {
     [ordered]@{ downloaded = $false; path = $target; error = $_.Exception.Message }
@@ -2180,9 +2329,10 @@ function Start-WorkerRuntime {
   $slots = [Math]::Max(1, [int](Get-MapValue $settings 'worker_estimated_http_account_slots'))
   $version = $script:HelperVersion
   $statusPath = Get-WorkerRuntimeStatusPath
+  $apiToken = Get-PlatformApiToken -Settings $settings
   $script:WorkerRuntimeCurrentCommandId = ''
   $script:WorkerRuntimeJob = Start-Job -Name 'aidp-local-worker-runtime' -ScriptBlock {
-    param($BaseUrl, $WorkerId, $DisplayName, $Version, $Slots, $StatusPath)
+    param($BaseUrl, $WorkerId, $DisplayName, $Version, $Slots, $StatusPath, $ApiToken)
     function Write-Status {
       param([string]$Status, [string]$CurrentCommandId = '', [string]$LastError = '')
       $payload = [ordered]@{
@@ -2198,6 +2348,9 @@ function Start-WorkerRuntime {
     function Invoke-Api {
       param([string]$Method, [string]$Path, $Payload = $null)
       $parameters = @{ Uri = ($BaseUrl.TrimEnd('/') + $Path); Method = $Method; TimeoutSec = 20 }
+      if ($ApiToken) {
+        $parameters.Headers = @{ 'X-AIDP-API-Token' = $ApiToken }
+      }
       if ($null -ne $Payload) {
         $parameters.Body = ($Payload | ConvertTo-Json -Depth 60 -Compress)
         $parameters.ContentType = 'application/json;charset=UTF-8'
@@ -2235,7 +2388,7 @@ function Start-WorkerRuntime {
       }
       Start-Sleep -Seconds 10
     }
-  } -ArgumentList $baseUrl, $workerId, $displayName, $version, $slots, $statusPath
+  } -ArgumentList $baseUrl, $workerId, $displayName, $version, $slots, $statusPath, $apiToken
   Get-WorkerRuntimeStatus
 }
 
@@ -2570,7 +2723,7 @@ function Sync-AidpSessionToMonitor {
   $url = $MonitorUrl.TrimEnd('/') + '/api/client-session'
   try {
     [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-    $result = Invoke-JsonPostUtf8 -Uri $url -Headers @{} -JsonBody $body -TimeoutSec 20
+    $result = Invoke-JsonPostUtf8 -Uri $url -Headers (Get-PlatformApiHeaders) -JsonBody $body -TimeoutSec 20
   } catch {
     $inner = if ($_.Exception.InnerException) { [string]$_.Exception.InnerException.Message } else { '' }
     throw "同步到监控服务失败：$($_.Exception.Message); inner=$inner; url=$url; cdpPort=$CdpPort; userId=$($payload['userId']); name=$($payload['name']); candidateCount=$(@($payload['userIdCandidates']).Count)"
@@ -2652,8 +2805,9 @@ function Open-AidpWithInjectedCookie {
   param([string]$MonitorUrl, [string]$Token)
   if (-not $MonitorUrl) { throw 'Missing monitorUrl.' }
   if (-not $Token) { throw 'Missing token.' }
-  $sessionUrl = $MonitorUrl.TrimEnd('/') + '/api/browser-open-session?token=' + [uri]::EscapeDataString($Token)
-  $session = Invoke-RestMethod -Uri $sessionUrl -TimeoutSec 15
+  $sessionUrl = $MonitorUrl.TrimEnd('/') + '/api/browser-open-session'
+  $sessionBody = @{ token = $Token } | ConvertTo-Json -Compress
+  $session = Invoke-RestMethod -Uri $sessionUrl -Method POST -Headers (Get-PlatformApiHeaders) -Body $sessionBody -ContentType 'application/json;charset=UTF-8' -TimeoutSec 15
   if (-not $session.ok) { throw 'Failed to consume open token.' }
   $safeUserId = if ($session.userId) { ([string]$session.userId) -replace '[^0-9A-Za-z_.-]', '_' } else { 'cookie-open' }
   $safeTarget = if ($session.target) { ([string]$session.target) -replace '[^0-9A-Za-z_.-]', '_' } else { 'task' }
@@ -3310,7 +3464,7 @@ try {
           $bodyText = Get-RequestBodyText $context.Request
           if (-not $bodyText) { throw 'Missing JSON request body.' }
           $body = ConvertFrom-JsonCompat $bodyText
-          Write-JsonResponse $context.Response (Set-AssistantConfig -Payload $body)
+          Write-JsonResponse $context.Response (Set-AssistantConfig -Payload $body -RawJson $bodyText)
         } else {
           Write-JsonResponse $context.Response ([ordered]@{ ok = $false; error = 'Method Not Allowed' }) 405
         }

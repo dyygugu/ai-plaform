@@ -1,8 +1,54 @@
 param(
   [string]$BaseUrl = "http://127.0.0.1:8789",
+  [string]$ApiPrefix = $env:AIDP_API_PREFIX,
+  [string]$ApiToken = $env:AIDP_ADMIN_API_TOKEN,
   [switch]$SkipDockerSmoke
 )
 $ErrorActionPreference = "Stop"
+function Normalize-ApiPrefix {
+  param([string]$Value)
+  $prefix = ([string]$Value).Trim()
+  if (-not $prefix) { $prefix = "/api" + "/v1" }
+  if (-not $prefix.StartsWith("/")) { $prefix = "/$prefix" }
+  $prefix = $prefix -replace "/+", "/"
+  if ($prefix.Length -gt 1) { $prefix = $prefix.TrimEnd("/") }
+  if (-not $prefix -or $prefix -eq "/") { $prefix = "/api" + "/v1" }
+  return $prefix
+}
+
+function Resolve-ApiToken {
+  param([string]$Value)
+  $token = ([string]$Value).Trim()
+  if ($token) { return $token }
+  $envToken = ([string]$env:AIDP_ADMIN_API_TOKEN).Trim()
+  if ($envToken) { return $envToken }
+  $envPath = Join-Path (Resolve-Path (Join-Path $PSScriptRoot "..")) ".env"
+  if (Test-Path $envPath) {
+    foreach ($line in Get-Content -LiteralPath $envPath) {
+      if ($line -match '^\s*AIDP_ADMIN_API_TOKEN\s*=\s*(.+?)\s*$') {
+        $candidate = $matches[1].Trim().Trim('"').Trim("'")
+        if ($candidate -and -not $candidate.StartsWith('${')) { return $candidate }
+      }
+    }
+  }
+  return ""
+}
+
+function Get-ApiHeaders {
+  param([string]$ApiToken)
+  $token = ([string]$ApiToken).Trim()
+  if (-not $token) { return @{} }
+  return @{ "X-AIDP-API-Token" = $token }
+}
+
+$ApiPrefix = Normalize-ApiPrefix $ApiPrefix
+$ApiBaseUrl = $BaseUrl.TrimEnd("/") + $ApiPrefix
+$env:AIDP_API_PREFIX = $ApiPrefix
+$ApiToken = Resolve-ApiToken $ApiToken
+$ApiHeaders = Get-ApiHeaders -ApiToken $ApiToken
+if ($ApiHeaders.Count -gt 0) {
+  $PSDefaultParameterValues["Invoke-RestMethod:Headers"] = $ApiHeaders
+}
 
 Push-Location (Join-Path $PSScriptRoot "..")
 try {
@@ -23,7 +69,7 @@ import app.db.models
 expected={'aidp_accounts','task_catalog_items','audit_logs','backup_jobs','ai_jobs','workers','rule_versions','rule_publish_events','rule_hit_stats','worker_events','maintenance_job_runs'}
 assert expected.issubset(set(Base.metadata.tables.keys()))
 routes=sorted(route.path for route in fastapi_app.routes if hasattr(route, 'path'))
-for path in ['/api/v1/health','/api/v1/accounts','/api/v1/accounts/login-slots','/api/v1/accounts/login-slots/new','/api/v1/accounts/{user_id}/login-slots/relogin','/api/v1/accounts/client-session','/api/client-session','/api/v1/accounts/legacy-migration/preview','/api/v1/accounts/legacy-migration/run','/api/v1/accounts/task-coverage/summary','/api/v1/accounts/task-coverage/matrix','/api/v1/accounts/task-coverage/baseline','/api/v1/data-quality/summary','/api/v1/data-quality/checks','/api/v1/data-quality/export','/api/v1/data-quality/report','/api/v1/incidents/summary','/api/v1/incidents/runbooks','/api/v1/incidents/close-loop','/api/v1/final-acceptance/matrix','/api/v1/final-acceptance/rollback','/api/v1/final-acceptance/evidence','/api/v1/roadmap-final/summary','/api/v1/roadmap-final/report','/api/v1/tasks/catalog','/api/v1/tasks/catalog/{item_id}','/api/v1/tasks/catalog/refresh','/api/v1/tasks/rules','/api/v1/tasks/task-page/sample-capture','/api/v1/settings/runtime','/api/v1/settings/task-source','/api/v1/settings/permissions','/api/v1/backups/plan','/api/v1/backups/manual','/api/v1/ai/queue','/api/v1/workers','/api/v1/workers/heartbeat','/api/v1/workers/events','/api/v1/workers/{worker_id}','/api/v1/workers/{worker_id}/logs','/api/v1/workers/{worker_id}/bind-account','/api/v1/workers/{worker_id}/version','/api/v1/workers/{worker_id}/claim-task','/api/v1/rules/center','/api/v1/rules/versions','/api/v1/rules/versions/{version_id}/diff','/api/v1/rules/versions/{version_id}/canary','/api/v1/rules/versions/{version_id}/publish','/api/v1/rules/versions/{version_id}/rollback','/api/v1/alerts/preview','/api/v1/alerts/rules','/api/v1/alerts/slo','/api/v1/alerts/summary','/api/v1/alerts/evaluate','/api/v1/delivery/summary','/api/v1/delivery/checklist','/api/v1/delivery/bundle','/api/v1/inspection/summary','/api/v1/inspection/checklist','/api/v1/inspection/run','/api/v1/freeze/summary','/api/v1/freeze/checklist','/api/v1/freeze/baseline','/api/v1/restore-drills/run','/api/v1/earnings/summary','/api/v1/earnings/export','/api/v1/ops/jobs','/api/v1/ops/jobs/{job_key}/run','/api/v1/ops/release-gate','/api/v1/ops/scheduler/plan','/api/v1/ops/scheduler/tick','/api/v1/ops/domain-switch-runbook','/api/v1/observability/summary','/api/v1/observability/collector-guard','/api/v1/observability/timeline','/api/v1/observability/probes/run','/api/v1/audit/logs']:
+for path in ['$ApiPrefix/health','$ApiPrefix/accounts','$ApiPrefix/accounts/login-slots','$ApiPrefix/accounts/login-slots/new','$ApiPrefix/accounts/{user_id}/login-slots/relogin','$ApiPrefix/accounts/client-session','/api/client-session','$ApiPrefix/accounts/legacy-migration/preview','$ApiPrefix/accounts/legacy-migration/run','$ApiPrefix/accounts/task-coverage/summary','$ApiPrefix/accounts/task-coverage/matrix','$ApiPrefix/accounts/task-coverage/baseline','$ApiPrefix/data-quality/summary','$ApiPrefix/data-quality/checks','$ApiPrefix/data-quality/export','$ApiPrefix/data-quality/report','$ApiPrefix/incidents/summary','$ApiPrefix/incidents/runbooks','$ApiPrefix/incidents/close-loop','$ApiPrefix/final-acceptance/matrix','$ApiPrefix/final-acceptance/rollback','$ApiPrefix/final-acceptance/evidence','$ApiPrefix/roadmap-final/summary','$ApiPrefix/roadmap-final/report','$ApiPrefix/tasks/catalog','$ApiPrefix/tasks/catalog/{item_id}','$ApiPrefix/tasks/catalog/refresh','$ApiPrefix/tasks/rules','$ApiPrefix/tasks/task-page/sample-capture','$ApiPrefix/settings/runtime','$ApiPrefix/settings/task-source','$ApiPrefix/settings/permissions','$ApiPrefix/backups/plan','$ApiPrefix/backups/manual','$ApiPrefix/ai/queue','$ApiPrefix/workers','$ApiPrefix/workers/heartbeat','$ApiPrefix/workers/events','$ApiPrefix/workers/{worker_id}','$ApiPrefix/workers/{worker_id}/logs','$ApiPrefix/workers/{worker_id}/bind-account','$ApiPrefix/workers/{worker_id}/version','$ApiPrefix/workers/{worker_id}/claim-task','$ApiPrefix/rules/center','$ApiPrefix/rules/versions','$ApiPrefix/rules/versions/{version_id}/diff','$ApiPrefix/rules/versions/{version_id}/canary','$ApiPrefix/rules/versions/{version_id}/publish','$ApiPrefix/rules/versions/{version_id}/rollback','$ApiPrefix/alerts/preview','$ApiPrefix/alerts/rules','$ApiPrefix/alerts/slo','$ApiPrefix/alerts/summary','$ApiPrefix/alerts/evaluate','$ApiPrefix/delivery/summary','$ApiPrefix/delivery/checklist','$ApiPrefix/delivery/bundle','$ApiPrefix/inspection/summary','$ApiPrefix/inspection/checklist','$ApiPrefix/inspection/run','$ApiPrefix/freeze/summary','$ApiPrefix/freeze/checklist','$ApiPrefix/freeze/baseline','$ApiPrefix/restore-drills/run','$ApiPrefix/earnings/summary','$ApiPrefix/earnings/export','$ApiPrefix/ops/jobs','$ApiPrefix/ops/jobs/{job_key}/run','$ApiPrefix/ops/release-gate','$ApiPrefix/ops/scheduler/plan','$ApiPrefix/ops/scheduler/tick','$ApiPrefix/ops/domain-switch-runbook','$ApiPrefix/observability/summary','$ApiPrefix/observability/collector-guard','$ApiPrefix/observability/timeline','$ApiPrefix/observability/probes/run','$ApiPrefix/audit/logs']:
     assert path in routes, path
 print('route_smoke_ok=true')
 "@ | python - | Tee-Object -Variable routeSmokeOutput | Out-Null
@@ -47,7 +93,7 @@ print('route_smoke_ok=true')
     do {
       Start-Sleep -Seconds 2
       try {
-        $health = Invoke-RestMethod "$BaseUrl/api/v1/health" -TimeoutSec 5
+        $health = Invoke-RestMethod "$ApiBaseUrl/health" -TimeoutSec 5
         $healthy = $health.status -eq "ok"
       }
       catch {
@@ -68,7 +114,7 @@ print('route_smoke_ok=true')
       New-Item -ItemType Directory -Force -Path $dataScreenshotDir | Out-Null
       Get-ChildItem -Path $sourceScreenshotDir -Filter "aidp-monitor-next-p*.png" -File | Copy-Item -Destination $dataScreenshotDir -Force
     }
-    $dockerSmokeOutput = & (Join-Path $PSScriptRoot "docker-smoke.ps1") -BaseUrl $BaseUrl -SeedSample
+    $dockerSmokeOutput = & (Join-Path $PSScriptRoot "docker-smoke.ps1") -BaseUrl $BaseUrl -ApiPrefix $ApiPrefix -ApiToken $ApiToken -SeedSample
     $containerStatus = docker ps --filter "name=aidp-monitor-next-app-1" --format "{{.Status}} {{.Ports}}"
     $dockerDeployOutput = @("docker_compose_up_ok=true", "container_status=$containerStatus")
     $dockerDeployStatus = "通过，已执行 docker compose up --build -d"
@@ -94,89 +140,89 @@ print('route_smoke_ok=true')
     "## Docker 本地验收入口",
     "",
     "- 前端看板：$BaseUrl",
-    "- 健康接口：$BaseUrl/api/v1/health",
+    "- 健康接口：$ApiBaseUrl/health",
     "- Docker deploy 输出：$dockerDeployText",
     "- Docker smoke 输出：$dockerSmokeText",
     "",
     "## 覆盖接口",
     "",
-    "- /api/v1/health",
-    "- /api/v1/accounts",
-    "- /api/v1/accounts/login-slots",
-    "- /api/v1/accounts/login-slots/new",
-    "- /api/v1/accounts/{user_id}/login-slots/relogin",
-    "- /api/v1/accounts/client-session",
+    "- $ApiPrefix/health",
+    "- $ApiPrefix/accounts",
+    "- $ApiPrefix/accounts/login-slots",
+    "- $ApiPrefix/accounts/login-slots/new",
+    "- $ApiPrefix/accounts/{user_id}/login-slots/relogin",
+    "- $ApiPrefix/accounts/client-session",
     "- /api/client-session",
-    "- /api/v1/accounts/legacy-migration/preview",
-    "- /api/v1/accounts/legacy-migration/run",
-    "- /api/v1/accounts/task-coverage/summary",
-    "- /api/v1/accounts/task-coverage/matrix",
-    "- /api/v1/accounts/task-coverage/baseline",
-    "- /api/v1/data-quality/summary",
-    "- /api/v1/data-quality/checks",
-    "- /api/v1/data-quality/export",
-    "- /api/v1/data-quality/report",
-    "- /api/v1/incidents/summary",
-    "- /api/v1/incidents/runbooks",
-    "- /api/v1/incidents/close-loop",
-    "- /api/v1/final-acceptance/matrix",
-    "- /api/v1/final-acceptance/rollback",
-    "- /api/v1/final-acceptance/evidence",
-    "- /api/v1/roadmap-final/summary",
-    "- /api/v1/roadmap-final/report",
-    "- /api/v1/tasks/catalog",
-    "- /api/v1/tasks/catalog/{item_id}",
-    "- /api/v1/tasks/catalog/refresh",
-    "- /api/v1/tasks/rules",
-    "- /api/v1/tasks/task-page/sample-capture",
-    "- /api/v1/settings/runtime",
-    "- /api/v1/settings/task-source",
-    "- /api/v1/settings/permissions",
-    "- /api/v1/backups/plan",
-    "- /api/v1/backups/manual",
-    "- /api/v1/ai/queue",
-    "- /api/v1/workers",
-    "- /api/v1/workers/heartbeat",
-    "- /api/v1/workers/events",
-    "- /api/v1/workers/{worker_id}",
-    "- /api/v1/workers/{worker_id}/logs",
-    "- /api/v1/workers/{worker_id}/bind-account",
-    "- /api/v1/workers/{worker_id}/version",
-    "- /api/v1/workers/{worker_id}/claim-task",
-    "- /api/v1/rules/center",
-    "- /api/v1/rules/versions",
-    "- /api/v1/rules/versions/{version_id}/diff",
-    "- /api/v1/rules/versions/{version_id}/canary",
-    "- /api/v1/rules/versions/{version_id}/publish",
-    "- /api/v1/rules/versions/{version_id}/rollback",
-    "- /api/v1/alerts/preview",
-    "- /api/v1/alerts/rules",
-    "- /api/v1/alerts/slo",
-    "- /api/v1/alerts/summary",
-    "- /api/v1/alerts/evaluate",
-    "- /api/v1/delivery/summary",
-    "- /api/v1/delivery/checklist",
-    "- /api/v1/delivery/bundle",
-    "- /api/v1/inspection/summary",
-    "- /api/v1/inspection/checklist",
-    "- /api/v1/inspection/run",
-    "- /api/v1/freeze/summary",
-    "- /api/v1/freeze/checklist",
-    "- /api/v1/freeze/baseline",
-    "- /api/v1/restore-drills/run",
-    "- /api/v1/earnings/summary",
-    "- /api/v1/earnings/export",
-    "- /api/v1/ops/jobs",
-    "- /api/v1/ops/jobs/{job_key}/run",
-    "- /api/v1/ops/release-gate",
-    "- /api/v1/ops/scheduler/plan",
-    "- /api/v1/ops/scheduler/tick",
-    "- /api/v1/ops/domain-switch-runbook",
-    "- /api/v1/observability/summary",
-    "- /api/v1/observability/collector-guard",
-    "- /api/v1/observability/timeline",
-    "- /api/v1/observability/probes/run",
-    "- /api/v1/audit/logs",
+    "- $ApiPrefix/accounts/legacy-migration/preview",
+    "- $ApiPrefix/accounts/legacy-migration/run",
+    "- $ApiPrefix/accounts/task-coverage/summary",
+    "- $ApiPrefix/accounts/task-coverage/matrix",
+    "- $ApiPrefix/accounts/task-coverage/baseline",
+    "- $ApiPrefix/data-quality/summary",
+    "- $ApiPrefix/data-quality/checks",
+    "- $ApiPrefix/data-quality/export",
+    "- $ApiPrefix/data-quality/report",
+    "- $ApiPrefix/incidents/summary",
+    "- $ApiPrefix/incidents/runbooks",
+    "- $ApiPrefix/incidents/close-loop",
+    "- $ApiPrefix/final-acceptance/matrix",
+    "- $ApiPrefix/final-acceptance/rollback",
+    "- $ApiPrefix/final-acceptance/evidence",
+    "- $ApiPrefix/roadmap-final/summary",
+    "- $ApiPrefix/roadmap-final/report",
+    "- $ApiPrefix/tasks/catalog",
+    "- $ApiPrefix/tasks/catalog/{item_id}",
+    "- $ApiPrefix/tasks/catalog/refresh",
+    "- $ApiPrefix/tasks/rules",
+    "- $ApiPrefix/tasks/task-page/sample-capture",
+    "- $ApiPrefix/settings/runtime",
+    "- $ApiPrefix/settings/task-source",
+    "- $ApiPrefix/settings/permissions",
+    "- $ApiPrefix/backups/plan",
+    "- $ApiPrefix/backups/manual",
+    "- $ApiPrefix/ai/queue",
+    "- $ApiPrefix/workers",
+    "- $ApiPrefix/workers/heartbeat",
+    "- $ApiPrefix/workers/events",
+    "- $ApiPrefix/workers/{worker_id}",
+    "- $ApiPrefix/workers/{worker_id}/logs",
+    "- $ApiPrefix/workers/{worker_id}/bind-account",
+    "- $ApiPrefix/workers/{worker_id}/version",
+    "- $ApiPrefix/workers/{worker_id}/claim-task",
+    "- $ApiPrefix/rules/center",
+    "- $ApiPrefix/rules/versions",
+    "- $ApiPrefix/rules/versions/{version_id}/diff",
+    "- $ApiPrefix/rules/versions/{version_id}/canary",
+    "- $ApiPrefix/rules/versions/{version_id}/publish",
+    "- $ApiPrefix/rules/versions/{version_id}/rollback",
+    "- $ApiPrefix/alerts/preview",
+    "- $ApiPrefix/alerts/rules",
+    "- $ApiPrefix/alerts/slo",
+    "- $ApiPrefix/alerts/summary",
+    "- $ApiPrefix/alerts/evaluate",
+    "- $ApiPrefix/delivery/summary",
+    "- $ApiPrefix/delivery/checklist",
+    "- $ApiPrefix/delivery/bundle",
+    "- $ApiPrefix/inspection/summary",
+    "- $ApiPrefix/inspection/checklist",
+    "- $ApiPrefix/inspection/run",
+    "- $ApiPrefix/freeze/summary",
+    "- $ApiPrefix/freeze/checklist",
+    "- $ApiPrefix/freeze/baseline",
+    "- $ApiPrefix/restore-drills/run",
+    "- $ApiPrefix/earnings/summary",
+    "- $ApiPrefix/earnings/export",
+    "- $ApiPrefix/ops/jobs",
+    "- $ApiPrefix/ops/jobs/{job_key}/run",
+    "- $ApiPrefix/ops/release-gate",
+    "- $ApiPrefix/ops/scheduler/plan",
+    "- $ApiPrefix/ops/scheduler/tick",
+    "- $ApiPrefix/ops/domain-switch-runbook",
+    "- $ApiPrefix/observability/summary",
+    "- $ApiPrefix/observability/collector-guard",
+    "- $ApiPrefix/observability/timeline",
+    "- $ApiPrefix/observability/probes/run",
+    "- $ApiPrefix/audit/logs",
     "",
     "## 人工验收提醒",
     "",

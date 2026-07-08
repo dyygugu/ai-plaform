@@ -2,6 +2,7 @@ import importlib.util
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 
 
 def _load_worker_client_module():
@@ -31,6 +32,31 @@ class FakeTransport:
 
 
 class WorkerClientRunnerTests(unittest.TestCase):
+    def test_http_json_request_sends_platform_api_token_header(self) -> None:
+        module = _load_worker_client_module()
+        captured_headers: dict[str, str] = {}
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, _exc_type, _exc, _tb) -> bool:
+                return False
+
+            def read(self) -> bytes:
+                return b'{"ok": true}'
+
+        def fake_urlopen(request, timeout: int):
+            self.assertEqual(timeout, 30)
+            captured_headers.update({key.lower(): value for key, value in request.header_items()})
+            return FakeResponse()
+
+        with patch.object(module.urllib.request, "urlopen", side_effect=fake_urlopen):
+            result = module.http_json_request("POST", "https://platform.51gugu.uk/api/v1/workers/register", {"worker_id": "worker-test"}, api_token="browser-secret")
+
+        self.assertEqual(result["ok"], True)
+        self.assertEqual(captured_headers["x-aidp-api-token"], "browser-secret")
+
     def test_register_heartbeat_claim_renew_and_success_result_for_health_probe(self) -> None:
         module = _load_worker_client_module()
         transport = FakeTransport()

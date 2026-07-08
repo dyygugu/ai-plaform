@@ -19,12 +19,23 @@ import {
 const statusColor: Record<string, string> = {
   passed: "green",
   info: "blue",
+  warn: "gold",
   warning: "gold",
   failed: "red",
   critical: "red",
   error: "red",
   open: "gold",
   closed: "green",
+};
+
+const severityLabel: Record<string, string> = {
+  debug: "提醒",
+  info: "提醒",
+  warn: "提醒",
+  warning: "提醒",
+  error: "一般",
+  failed: "紧急",
+  critical: "紧急",
 };
 
 function safeError(error: unknown): string {
@@ -51,7 +62,7 @@ export function AlertsPage() {
       if (notificationConfig) {
         notificationForm.setFieldsValue({
           enabled: notificationConfig.enabled,
-          webhook_url: notificationConfig.webhook_url || "",
+          webhook_url: "",
           secret: "",
           min_level: notificationConfig.min_level,
           events: notificationConfig.events.join(","),
@@ -85,7 +96,7 @@ export function AlertsPage() {
       const values = await notificationForm.validateFields();
       const result = await updateNotificationConfig({
         enabled: values.enabled,
-        webhook_url: values.webhook_url,
+        webhook_url: values.webhook_url || undefined,
         secret: values.secret || undefined,
         min_level: values.min_level,
         events: values.events.split(",").map((item) => item.trim()).filter(Boolean),
@@ -122,7 +133,7 @@ export function AlertsPage() {
 
   const ruleColumns: ColumnsType<AlertRuleItem> = [
     { title: "规则", dataIndex: "title", key: "title" },
-    { title: "级别", dataIndex: "severity", key: "severity", render: (value: string) => <Tag color={statusColor[value] ?? "default"}>{value}</Tag> },
+    { title: "级别", dataIndex: "severity", key: "severity", render: (value: string) => <Tag color={statusColor[value] ?? "default"}>{severityLabel[value] ?? value}</Tag> },
     { title: "SLO", dataIndex: "slo_target", key: "slo_target" },
     { title: "静默", dataIndex: "silence_minutes", key: "silence_minutes", render: (value: number) => `${value} 分钟` },
     { title: "Runbook", dataIndex: "runbook_hint", key: "runbook_hint" },
@@ -132,13 +143,13 @@ export function AlertsPage() {
     { title: "指标", dataIndex: "title", key: "title" },
     { title: "目标", dataIndex: "target", key: "target" },
     { title: "当前", dataIndex: "current", key: "current" },
-    { title: "状态", dataIndex: "status", key: "status", render: (value: string) => <Tag color={statusColor[value] ?? "default"}>{value}</Tag> },
+    { title: "状态", dataIndex: "status", key: "status", render: (value: string) => <Tag color={statusColor[value] ?? "default"}>{severityLabel[value] ?? value}</Tag> },
     { title: "说明", dataIndex: "message", key: "message" },
   ];
 
   const incidentColumns: ColumnsType<AlertIncidentItem> = [
     { title: "事件", dataIndex: "title", key: "title" },
-    { title: "级别", dataIndex: "severity", key: "severity", render: (value: string) => <Tag color={statusColor[value] ?? "default"}>{value}</Tag> },
+    { title: "级别", dataIndex: "severity", key: "severity", render: (value: string) => <Tag color={statusColor[value] ?? "default"}>{severityLabel[value] ?? value}</Tag> },
     { title: "对象", dataIndex: "subject", key: "subject" },
     { title: "原因", dataIndex: "reason", key: "reason" },
     { title: "处理建议", dataIndex: "recommended_action", key: "recommended_action" },
@@ -151,7 +162,7 @@ export function AlertsPage() {
         <Button onClick={load} loading={loading}>刷新</Button>
         <Button type="primary" onClick={onEvaluate}>运行告警评估</Button>
       </Space>
-      <Alert type={notification?.sends_network ? "success" : "info"} showIcon message={notification?.sends_network ? "飞书错误通知会按配置发送" : "飞书错误通知当前不会实际发送"} description={notification?.message ?? "可在本页配置飞书 webhook、dry-run、等级阈值和冷却时间；不会切换正式域名。"} />
+      <Alert type={notification?.sends_network ? "success" : "info"} showIcon message={notification?.sends_network ? "飞书错误通知会按配置发送" : "飞书错误通知当前不会实际发送"} description={notification?.message ?? "飞书通知按“提醒 / 一般 / 紧急”分级：提醒是不一定要立刻处理，一般是可以稍后处理，紧急是必须立刻处理。可在本页配置飞书 webhook、dry-run、等级阈值和冷却时间；不会切换正式域名。"} />
       <Row gutter={[16, 16]}>
         <Col xs={24} md={6}><Card><Statistic title="整体状态" value={evaluation?.status ?? summary?.status ?? "加载中"} /></Card></Col>
         <Col xs={24} md={6}><Card><Statistic title="告警规则" value={rules.length} /></Card></Col>
@@ -172,7 +183,7 @@ export function AlertsPage() {
           <Row gutter={[16, 0]}>
             <Col xs={24} md={12}>
               <Form.Item label="飞书 webhook" name="webhook_url">
-                <Input placeholder="https://open.feishu.cn/open-apis/bot/v2/hook/..." />
+                <Input placeholder={notification?.webhook_configured ? "已配置；留空保持不变" : "https://open.feishu.cn/open-apis/bot/v2/hook/..."} />
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
@@ -192,7 +203,7 @@ export function AlertsPage() {
             </Col>
             <Col xs={24} md={6}>
               <Form.Item label="最低级别" name="min_level">
-                <Select options={[{ value: "warn", label: "warn" }, { value: "error", label: "error" }, { value: "critical", label: "critical" }]} />
+                <Select options={[{ value: "warn", label: "提醒（不一定要立刻处理）" }, { value: "error", label: "一般（可以稍后处理）" }, { value: "critical", label: "紧急（必须立刻处理）" }]} />
               </Form.Item>
             </Col>
             <Col xs={24} md={6}>

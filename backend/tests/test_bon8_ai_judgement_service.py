@@ -127,7 +127,7 @@ class Bon8AiJudgementServiceTests(unittest.TestCase):
             self.assertTrue(Path(prepared.confirmation_sheet.review_payload_path).exists())
         db.close()
 
-    def test_prepare_first_item_review_with_ai_passes_task_ability_prompt_to_provider_runtime(self) -> None:
+    def test_prepare_first_item_review_with_ai_uses_task_ai_runtime(self) -> None:
         db = _session()
         with tempfile.TemporaryDirectory() as temp_dir:
             state_dir = Path(temp_dir)
@@ -137,7 +137,6 @@ class Bon8AiJudgementServiceTests(unittest.TestCase):
                 account_loader=lambda user_id: {"userId": user_id, "name": "用户样例002", "cookie": "sessionid=test"},
                 transport=_category_transport,
                 state_dir=state_dir,
-                task_ability_prompt="bon8 手调提示词：严格比较布局、功能和文案一致性。",
             )
             provider_runtimes = []
 
@@ -154,7 +153,8 @@ class Bon8AiJudgementServiceTests(unittest.TestCase):
             )
 
             self.assertEqual(len(provider_runtimes), 1)
-            self.assertEqual(provider_runtimes[0].get("task_ability_prompt"), "bon8 手调提示词：严格比较布局、功能和文案一致性。")
+            self.assertIsInstance(provider_runtimes[0], dict)
+            self.assertNotIn("task_ability_prompt", provider_runtimes[0])
         db.close()
 
     def test_execute_auto_account_tick_with_ai_submits_current_item_and_records_timer(self) -> None:
@@ -300,7 +300,7 @@ class Bon8AiJudgementServiceTests(unittest.TestCase):
                 user_id = account["userId"]
                 calls.append((user_id, kind, path, body))
                 user_category_calls = [call for call in calls if call[0] == user_id and call[2] == "/dispatcher/search_item/category"]
-                if path == "/dispatcher/search_item/category" and user_id.endswith("3620") and len(user_category_calls) == 1:
+                if path == "/dispatcher/search_item/category" and user_id.endswith("002") and len(user_category_calls) == 1:
                     item_content = {
                         "mediaUrls": ["https://example.test/run-tick.png"],
                         **{f"model{index}": {"html": f"https://example.test/run-model{index}.html"} for index in range(1, 9)},

@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from app.core.settings import get_settings
 from app.models.audit import AuditSeverity
 from app.schemas.freeze import FreezeChecklistResponse, FreezeCreateRequest, FreezeCreateResponse, FreezeItem, FreezeSummaryResponse
+from app.services.api_paths import api_path, public_api_url
 from app.services.audit_service import write_audit
 from app.services.delivery_service import build_delivery_summary
 from app.services.inspection_service import build_inspection_summary
@@ -21,12 +22,13 @@ def build_freeze_summary(db: Session) -> FreezeSummaryResponse:
     inspection = build_inspection_summary(db)
     _, runbook_ready, runbook_steps, rollback_steps = build_domain_switch_runbook(db)
     required_failed = [item.key for item in release_checks if item.required and item.status == "failed"]
+    domain_runbook_path = api_path("/ops/domain-switch-runbook", settings)
     freeze_items = [
         FreezeItem(
             key="local_acceptance_entry",
             title="固定本地验收入口",
             status="passed",
-            evidence=f"{settings.public_base_url}/api/v1/health",
+            evidence=public_api_url("/health", settings),
             owner="system",
             action=f"继续以 {settings.public_base_url} 作为切换前验收入口。",
             rollback="若验收失败，不修改正式反代。",
@@ -36,7 +38,7 @@ def build_freeze_summary(db: Session) -> FreezeSummaryResponse:
             key="release_gate",
             title="发布门禁冻结",
             status="passed" if release_ready else "failed",
-            evidence="/api/v1/ops/release-gate",
+            evidence=api_path("/ops/release-gate", settings),
             owner="operator",
             action="确认所有必需门禁通过。" if release_ready else f"先修复失败门禁：{', '.join(required_failed)}",
             rollback="任一必需门禁失败时，正式域名保持当前 upstream。",
@@ -56,7 +58,7 @@ def build_freeze_summary(db: Session) -> FreezeSummaryResponse:
             key="daily_inspection",
             title="巡检基线冻结",
             status=inspection.status,
-            evidence="/api/v1/inspection/summary",
+            evidence=api_path("/inspection/summary", settings),
             owner="system",
             action="确认巡检 warning 是否为预期样例账号/手动域名提醒。",
             rollback="若存在非预期 failed，先修复再重新生成冻结清单。",
@@ -66,7 +68,7 @@ def build_freeze_summary(db: Session) -> FreezeSummaryResponse:
             key="domain_runbook",
             title="正式域名 Runbook 冻结",
             status="manual" if runbook_ready else "failed",
-            evidence="/api/v1/ops/domain-switch-runbook",
+            evidence=domain_runbook_path,
             owner="user",
             action="用户最终手动修改 manage.51gugu.uk 反代。",
             rollback="保留切换前 upstream，异常时立即恢复。",
@@ -78,7 +80,7 @@ def build_freeze_summary(db: Session) -> FreezeSummaryResponse:
             key=f"rollback_{step.order}",
             title=step.title,
             status="manual",
-            evidence="/api/v1/ops/domain-switch-runbook",
+            evidence=domain_runbook_path,
             owner="user",
             action=step.command_or_action,
             rollback=step.expected_result,

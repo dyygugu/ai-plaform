@@ -69,6 +69,25 @@ from app.services.worker_service import (
 router = APIRouter(prefix="/workers", tags=["workers"])
 
 
+def _safe_worker_command_payload(payload: WorkerCommandCreateRequest) -> dict:
+    command_payload = dict(payload.payload or {})
+    if payload.command_type != "produce_account_task":
+        return command_payload
+
+    mode = str(command_payload.get("mode") or "")
+    if mode != "preflight_only" or command_payload.get("preflight_only") is not True:
+        raise HTTPException(
+            status_code=400,
+            detail="produce_account_task commands must be preflight_only until Step4 authorization is available",
+        )
+    if command_payload.get("writes_remote") is not False or command_payload.get("submits_remote") is not False:
+        raise HTTPException(
+            status_code=400,
+            detail="preflight_only produce_account_task commands must set writes_remote=false and submits_remote=false",
+        )
+    return command_payload
+
+
 def _summary_read(summary: dict) -> WorkerLogSummary:
     return WorkerLogSummary(
         worker_id=summary["worker_id"],
@@ -226,13 +245,14 @@ def manually_recover_account_task_lease_route(
 
 @router.post("/commands", response_model=WorkerCommandRead)
 def create_dispatch_command(payload: WorkerCommandCreateRequest, db: Session = Depends(get_db)) -> WorkerCommandRead:
+    command_payload = _safe_worker_command_payload(payload)
     command = create_worker_command(
         db,
         worker_id=payload.worker_id,
         command_type=payload.command_type,
         account_user_id=payload.account_user_id,
         task_id=payload.task_id,
-        payload=payload.payload,
+        payload=command_payload,
     )
     write_audit(
         db,
@@ -444,6 +464,9 @@ def update_version(worker_id: str, payload: WorkerVersionUpdateRequest, db: Sess
 
 @router.post("/{worker_id}/claim-task", response_model=WorkerDetailResponse)
 def claim_task(worker_id: str, payload: WorkerTaskClaimRequest, db: Session = Depends(get_db)) -> WorkerDetailResponse:
+    worker = ensure_worker(db, worker_id)
+    if worker.status.value not in {"online", "degraded"}:
+        raise HTTPException(status_code=403, detail="Worker 未通过批准或不可调度，不能领取任务")
     worker, _event = claim_worker_task(db, worker_id, payload.task_id, payload.account_user_id, payload.message)
     write_audit(db, event_type="worker_task_claim", message=f"Worker {worker_id} claimed task {payload.task_id}", target_type="worker", target_id=worker_id)
     db.commit()

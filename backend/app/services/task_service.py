@@ -82,16 +82,30 @@ def update_task_rule_config(db: Session, payload: TaskRuleConfigUpdateRequest, u
 
 
 def list_task_catalog(db: Session, source_account_user_id: Optional[str] = None) -> list[TaskCatalogItem]:
-    source = source_account_user_id or get_task_source_account_user_id(db)
+    source = str(source_account_user_id or "").strip()
+    query = select(TaskCatalogItem)
+    if source:
+        query = query.where(TaskCatalogItem.source_account_user_id == source)
     items = list(
         db.scalars(
-            select(TaskCatalogItem)
-            .where(TaskCatalogItem.source_account_user_id == source)
-            .order_by(TaskCatalogItem.updated_at.desc())
+            query.order_by(TaskCatalogItem.updated_at.desc())
         )
     )
     items = _drop_masked_duplicates(items)
-    return sorted(items, key=lambda item: (_pending_sort_value(item.pending_raw), item.task_status_raw, item.updated_at), reverse=True)
+    items = sorted(items, key=lambda item: (_pending_sort_value(item.pending_raw), item.task_status_raw, item.updated_at), reverse=True)
+    return items if source else _deduplicate_catalog_by_task_id(items)
+
+
+def _deduplicate_catalog_by_task_id(items: list[TaskCatalogItem]) -> list[TaskCatalogItem]:
+    selected: list[TaskCatalogItem] = []
+    seen: set[str] = set()
+    for item in items:
+        key = str(item.task_id or "").strip()
+        if key in seen:
+            continue
+        seen.add(key)
+        selected.append(item)
+    return selected
 
 
 def _drop_masked_duplicates(items: list[TaskCatalogItem]) -> list[TaskCatalogItem]:
@@ -255,6 +269,56 @@ def seed_tasks_from_sample_summary(
         tasks.append(item)
     db.flush()
     return tasks
+
+
+def sync_task_catalog_from_production_accounts(db: Session, accounts: Any) -> list[TaskCatalogItem]:
+    synced: list[TaskCatalogItem] = []
+    account_items = accounts if isinstance(accounts, list) else []
+    for account in account_items:
+        source = _read_value(account, "user_id", "userId", "user_id")
+        if not source:
+            continue
+        task_stats = _read_value(account, "task_stats", "tasks", fallback=[])
+        if not isinstance(task_stats, list):
+            continue
+        for task in task_stats:
+            task_id = _read_value(task, "task_id", "id", "taskId", "TaskID")
+            if not task_id:
+                continue
+            task_name = _read_value(task, "task_name", "name", "title", fallback=task_id)
+            pending = _read_int_value(task, "pending", "poolPendingSubmit", "todo")
+            status = "进行中" if pending > 0 else "已同步"
+            item, _created = seed_task_catalog_item(
+                db,
+                TaskCatalogSeedRequest(
+                    source_account_user_id=source,
+                    raw_task_name=f"{task_name} {task_id}",
+                    task_status_raw=status,
+                    pending_raw=str(pending),
+                ),
+            )
+            synced.append(item)
+    db.flush()
+    return synced
+
+
+def _read_value(source: Any, *keys: str, fallback: Any = "") -> Any:
+    for key in keys:
+        if isinstance(source, dict):
+            value = source.get(key)
+        else:
+            value = getattr(source, key, None)
+        if value not in (None, ""):
+            return str(value).strip() if not isinstance(value, list) else value
+    return fallback
+
+
+def _read_int_value(source: Any, *keys: str) -> int:
+    value = _read_value(source, *keys, fallback=0)
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _select_pending_node(nodes: Any) -> Optional[dict[str, Any]]:

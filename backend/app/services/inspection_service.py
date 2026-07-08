@@ -10,6 +10,7 @@ from app.models.audit import AuditSeverity
 from app.models.task import TaskCatalogItem
 from app.models.worker import Worker, WorkerStatus
 from app.schemas.inspection import InspectionCheckItem, InspectionChecklistResponse, InspectionRunRequest, InspectionRunResponse, InspectionSummaryResponse
+from app.services.api_paths import api_path, public_api_url
 from app.services.alerting_service import build_slo_summary
 from app.services.audit_service import write_audit
 from app.services.delivery_service import build_delivery_summary
@@ -24,6 +25,7 @@ def build_inspection_summary(db: Session) -> InspectionSummaryResponse:
     release_checks, release_ready = build_release_gate(db)
     slo = build_slo_summary(db)
     delivery = build_delivery_summary(db)
+    health_url = public_api_url("/health", settings)
     task_count = db.query(TaskCatalogItem).count()
     account_total = db.query(AidpAccount).count()
     needs_login = db.query(AidpAccount).filter(AidpAccount.status == AccountStatus.NEEDS_LOGIN).count()
@@ -34,8 +36,8 @@ def build_inspection_summary(db: Session) -> InspectionSummaryResponse:
             key="local_health",
             title="本地健康入口",
             status="passed",
-            message=f"{settings.public_base_url}/api/v1/health 可作为本地验收健康入口。",
-            evidence="/api/v1/health",
+            message=f"{health_url} 可作为本地验收健康入口。",
+            evidence=api_path("/health", settings),
             recommended_action="保持 8789 新版容器运行，正式域名切换前继续使用本地入口复验。",
             details={"base_url": settings.public_base_url},
         ),
@@ -44,7 +46,7 @@ def build_inspection_summary(db: Session) -> InspectionSummaryResponse:
             title="任务目录基线",
             status="passed" if task_count > 0 else "warning",
             message=f"任务目录当前 {task_count} 条，账号 {account_total} 个，其中需登录 {needs_login} 个。",
-            evidence="/api/v1/tasks/catalog",
+            evidence=api_path("/tasks/catalog", settings),
             recommended_action="若任务目录为空或需登录账号非预期，先刷新只读样本并检查账号 Cookie。",
             details={"task_count": task_count, "account_total": account_total, "needs_login": needs_login},
         ),
@@ -53,7 +55,7 @@ def build_inspection_summary(db: Session) -> InspectionSummaryResponse:
             title="采集守护基线",
             status=collector.status,
             message=collector.message,
-            evidence="/api/v1/observability/collector-guard",
+            evidence=api_path("/observability/collector-guard", settings),
             recommended_action="若 warning/failed，打开观测中心检查样本年龄、stale/error 和来源账号。",
             details={"sample_exists": collector.sample_exists, "sample_age_minutes": collector.sample_age_minutes or 0, "task_count": collector.task_count},
         ),
@@ -62,7 +64,7 @@ def build_inspection_summary(db: Session) -> InspectionSummaryResponse:
             title="Worker 在线基线",
             status="passed" if online_workers >= 1 else "warning",
             message=f"当前在线 Worker {online_workers} 个。",
-            evidence="/api/v1/workers",
+            evidence=api_path("/workers", settings),
             recommended_action="若为 0，检查 Worker 心跳、版本和最近日志摘要。",
             details={"online_workers": online_workers},
         ),
@@ -71,7 +73,7 @@ def build_inspection_summary(db: Session) -> InspectionSummaryResponse:
             title="发布门禁基线",
             status="passed" if release_ready else "failed",
             message="发布门禁必需项通过。" if release_ready else f"发布门禁失败：{', '.join(failed_release)}",
-            evidence="/api/v1/ops/release-gate",
+            evidence=api_path("/ops/release-gate", settings),
             recommended_action="若 failed，保持正式域名指向当前稳定 upstream，逐项修复生产护栏。",
             details={"failed_required": failed_release},
         ),
@@ -80,7 +82,7 @@ def build_inspection_summary(db: Session) -> InspectionSummaryResponse:
             title="SLO 告警基线",
             status=slo.overall_status,
             message=f"SLO 总体状态 {slo.overall_status}，指标 {len(slo.indicators)} 项。",
-            evidence="/api/v1/alerts/slo",
+            evidence=api_path("/alerts/slo", settings),
             recommended_action="若 warning，打开告警中心查看事件和本地飞书预览；外部发送仍关闭。",
             details={"indicator_count": len(slo.indicators)},
         ),
@@ -89,7 +91,7 @@ def build_inspection_summary(db: Session) -> InspectionSummaryResponse:
             title="交付证据基线",
             status=delivery.status,
             message=delivery.message,
-            evidence="/api/v1/delivery/summary",
+            evidence=api_path("/delivery/summary", settings),
             recommended_action="若 warning，通常表示正式域名仍待用户手动切换；交付前确认最新证据包。",
             details={"latest_report": delivery.latest_report.path, "screenshots": len(delivery.screenshots), "todo_unchecked": delivery.todo_unchecked_count},
         ),
@@ -98,7 +100,7 @@ def build_inspection_summary(db: Session) -> InspectionSummaryResponse:
             title="正式域名手动状态",
             status="manual",
             message="manage.51gugu.uk 未由系统自动切换，仍等待用户最终手动改反代。",
-            evidence="/api/v1/ops/domain-switch-runbook",
+            evidence=api_path("/ops/domain-switch-runbook", settings),
             recommended_action="人工验收完成后再手动切换正式反代，并保留旧 upstream 以便回滚。",
             details={"production_domain": "manage.51gugu.uk", "auto_switch": False},
         ),

@@ -1,6 +1,7 @@
 import axios from "axios";
 
 export interface HealthResponse { status: string; environment: string; version: string; api_prefix: string; task_source_account_user_id: string; public_base_url: string; backup_local_retention_days: number; backup_external_retention_days: number; backup_cleanup_time: string; }
+export interface PlatformLoginResponse { access_token: string; token_type: string; expires_in: number; role: string; phone_masked: string; message: string; }
 export interface TaskCatalogItem { id: number; source_account_user_id: string; raw_task_name: string; task_short_name: string; task_id: string; task_name_id: string; task_status_raw: string; task_status_color: "green" | "blue" | "gray" | "red" | "yellow"; pending_raw: string; visibility: string; last_task_page_seen_at: string | null; last_task_page_error: string | null; capability_available: boolean; capability_recording_count: number; }
 export interface TaskCatalogResponse { source_account_user_id: string; items: TaskCatalogItem[]; stale: boolean; last_error: string | null; }
 export interface TaskCatalogEvent { id: number; task_catalog_item_id: number; source_account_user_id: string; task_id: string; event_type: string; status_raw: string; pending_raw: string; message: string; created_at: string; }
@@ -166,7 +167,7 @@ export interface FreezeItem { key: string; title: string; status: string; eviden
 export interface FreezeSummaryResponse { generated_at: string; status: string; base_url: string; production_domain: string; manual_only: boolean; ready_for_manual_switch: boolean; freeze_items: FreezeItem[]; rollback_items: FreezeItem[]; evidence_paths: string[]; message: string; }
 export interface FreezeChecklistResponse { generated_at: string; freeze_items: FreezeItem[]; rollback_items: FreezeItem[]; manual_confirmation_items: string[]; risk_notes: string[]; }
 export interface FreezeCreateResponse { trace_id: string; status: string; generated_at: string; report_path: string | null; audit_trace_id: string | null; summary: FreezeSummaryResponse; message: string; }
-export interface TaskAbilityDraftItem { id: string; version: string; status: string; task_name: string; task_id: string; specific_rules: string; sample_data: string; related_content: string; system_ai_draft: string; system_ai_trace_id: string; provider_status: string; next_step: string; created_at: string; updated_at: string; flow_stage: string; capability_enabled: boolean; real_no_submit_review: Record<string, unknown>; task_queue_snapshot: Record<string, unknown>; }
+export interface TaskAbilityDraftItem { id: string; version: string; status: string; task_name: string; task_id: string; task_type: string; ability_source: string; source_config: Record<string, unknown>; field_mapping: Record<string, unknown>; validation_rules: Record<string, unknown>; specific_rules: string; sample_data: string; related_content: string; system_ai_draft: string; system_ai_trace_id: string; provider_status: string; next_step: string; created_at: string; updated_at: string; flow_stage: string; capability_enabled: boolean; real_no_submit_review: Record<string, unknown>; task_queue_snapshot: Record<string, unknown>; }
 export interface TaskAbilityDraftListResponse { generated_at: string; total: number; latest_draft: TaskAbilityDraftItem | null; items: TaskAbilityDraftItem[]; message: string; }
 export interface TaskAbilityDryRunResponse { ok: boolean; stage: string; draft_id: string; task_name: string; task_id: string; writes_remote: boolean; submits_remote: boolean; evidence_path: string; field_diff: Record<string, unknown>; payload_preview: Record<string, unknown>; message: string; }
 export interface TaskAbilityRealNoSubmitResponse { ok: boolean; stage: string; draft_id: string; task_name: string; task_id: string; writes_remote: boolean; submits_remote: boolean; sends_network: boolean; queue_snapshot: Record<string, unknown>; question_context: Record<string, unknown>; ai_decision: Record<string, unknown>; answer_preview: Record<string, unknown>; saved_answer: Record<string, unknown>; saved_to_task_ui: boolean; temp_draft_result: Record<string, unknown>; temp_draft_payload_preview: Record<string, unknown>; ui_review_hint: string; review_status: string; review_artifact_path: string; message: string; }
@@ -214,8 +215,73 @@ export interface ProbeRunResponse { trace_id: string; status: string; started_at
 export interface TimelineEventItem { id: string; source: string; severity: string; title: string; message: string; trace_id: string; created_at: string; target_type: string; target_id: string; }
 export interface ObservabilitySummary { generated_at: string; status: string; environment: string; public_base_url: string; metrics: ObservabilityMetricItem[]; collector_guard: CollectorGuardResponse; recent_timeline: TimelineEventItem[]; probes: ProbeResultItem[]; }
 
-export const api = axios.create({ baseURL: "/api/v1", withCredentials: true });
+const DEFAULT_API_PREFIX = "/api/v1";
+
+function normalizeApiPrefix(value: string | undefined): string {
+  const raw = (value || DEFAULT_API_PREFIX).trim();
+  if (!raw) return DEFAULT_API_PREFIX;
+  const withLeadingSlash = raw.startsWith("/") ? raw : `/${raw}`;
+  const normalized = withLeadingSlash.replace(/\/+/g, "/").replace(/\/+$/, "");
+  return normalized && normalized !== "/" ? normalized : DEFAULT_API_PREFIX;
+}
+
+const viteEnv = (import.meta as ImportMeta & { env?: { VITE_AIDP_API_PREFIX?: string } }).env;
+const runtimeApiPrefix = typeof window !== "undefined"
+  ? (window as Window & { __AIDP_API_PREFIX__?: string }).__AIDP_API_PREFIX__
+  : undefined;
+
+export const apiPrefix = normalizeApiPrefix(runtimeApiPrefix || viteEnv?.VITE_AIDP_API_PREFIX);
+export const api = axios.create({ baseURL: apiPrefix, withCredentials: true });
+
+api.interceptors.request.use((config) => {
+  const token = typeof window !== "undefined"
+    ? (window.localStorage.getItem("aidpApiToken") || window.sessionStorage.getItem("aidpApiToken") || "").trim()
+    : "";
+  if (token) {
+    config.headers = config.headers ?? {};
+    if (token.startsWith("web.")) {
+      (config.headers as Record<string, string>).Authorization = `Bearer ${token}`;
+    } else {
+      (config.headers as Record<string, string>)["X-AIDP-API-Token"] = token;
+    }
+  }
+  return config;
+});
+
+api.interceptors.response.use(
+  (response) => response,
+  (error: unknown) => {
+    const response = (error as { response?: { status?: number; data?: { detail?: string } } }).response;
+    const status = response?.status;
+    const detail = response?.data?.detail || (error instanceof Error ? error.message : "接口请求失败");
+    if (typeof window !== "undefined" && (status === 401 || status === 403 || status === 503)) {
+      window.dispatchEvent(new CustomEvent("aidp-api-auth-error", { detail: { status, message: detail } }));
+    }
+    return Promise.reject(new Error(detail));
+  },
+);
+
+async function downloadProtectedFile(path: string, fallbackFilename: string): Promise<void> {
+  const response = await api.get<Blob>(path, { responseType: "blob" });
+  const disposition = String(response.headers["content-disposition"] || "");
+  const filenameMatch = /filename\*?=(?:UTF-8''|")?([^";]+)/i.exec(disposition);
+  const filename = filenameMatch ? decodeURIComponent(filenameMatch[1].replace(/"/g, "")) : fallbackFilename;
+  const blob = response.data;
+  const url = URL.createObjectURL(blob);
+  try {
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+  } finally {
+    window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+}
+
 export async function fetchHealth(): Promise<HealthResponse> { return (await api.get<HealthResponse>("/health")).data; }
+export async function loginToPlatform(payload: { phone: string; password: string }): Promise<PlatformLoginResponse> { return (await api.post<PlatformLoginResponse>("/auth/login", payload)).data; }
 export async function fetchTaskCatalog(): Promise<TaskCatalogResponse> { return (await api.get<TaskCatalogResponse>("/tasks/catalog")).data; }
 export async function fetchTaskDetail(id: number): Promise<TaskCatalogDetailResponse> { return (await api.get<TaskCatalogDetailResponse>(`/tasks/catalog/${id}`)).data; }
 export async function fetchTaskCapability(id: number): Promise<TaskCapabilityCardResponse> { return (await api.get<TaskCapabilityCardResponse>(`/tasks/catalog/${id}/capability`)).data; }
@@ -286,8 +352,8 @@ export async function pauseExecutionDeviceReceiving(workerId: string): Promise<E
 export async function resumeExecutionDeviceReceiving(workerId: string): Promise<ExecutionDeviceItem> { return (await api.post<ExecutionDeviceItem>(`/execution-devices/${workerId}/resume-receiving`, {})).data; }
 export async function checkExecutionDeviceUpdates(workerId: string): Promise<ExecutionDeviceItem> { return (await api.post<ExecutionDeviceItem>(`/execution-devices/${workerId}/check-updates`, {})).data; }
 export async function fetchLocalAgentLatestRelease(): Promise<LocalAgentReleaseRead> { return (await api.get<LocalAgentReleaseRead>("/local-agent/releases/latest")).data; }
-export function downloadLocalAgentSuite(): void { window.open("/api/v1/local-agent/releases/latest/download-suite", "_blank", "noopener,noreferrer"); }
-export function downloadLocalAgentInstaller(): void { window.open("/api/v1/local-agent/releases/latest/download-installer", "_blank", "noopener,noreferrer"); }
+export function downloadLocalAgentSuite(): void { void downloadProtectedFile("/local-agent/releases/latest/download-suite", "aidp-local-suite.zip"); }
+export function downloadLocalAgentInstaller(): void { void downloadProtectedFile("/local-agent/releases/latest/download-installer", "AIDP-Local-Helper-Setup.exe"); }
 export async function fetchWorkerEventContract(): Promise<WorkerEventContractResponse> { return (await api.get<WorkerEventContractResponse>("/workers/event-contract")).data; }
 export async function ensurePlatformWorker(inheritedHttpAccountSlots: number): Promise<WorkerItem> { return (await api.post<WorkerItem>("/workers/platform-worker/ensure", { inherited_http_account_slots: inheritedHttpAccountSlots })).data; }
 export async function registerWorker(payload: { worker_id: string; display_name?: string; version?: string; estimated_http_account_slots?: number }): Promise<WorkerItem> { return (await api.post<WorkerItem>("/workers/register", payload)).data; }
@@ -327,27 +393,13 @@ export async function fetchDeletedProductionAccounts(): Promise<DeletedProductio
 export async function deleteProductionAccount(userId: string): Promise<AccountRecycleActionResponse> { return (await api.post<AccountRecycleActionResponse>(`/accounts/${userId}/delete`, {})).data; }
 export async function restoreProductionAccount(userId: string): Promise<AccountRecycleActionResponse> { return (await api.post<AccountRecycleActionResponse>(`/accounts/${userId}/restore`, {})).data; }
 export async function fetchBon8ProductionStatus(): Promise<Bon8ProductionStatusResponse> { return (await api.get<Bon8ProductionStatusResponse>("/bon8-production/status")).data; }
-export async function startBon8Production(payload: { account_user_ids: string[]; task_id?: string; node_id?: string; write_audit?: boolean }): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>("/bon8-production/start", payload)).data; }
 export async function fetchBon8ProductionRun(runId: string): Promise<Bon8ProductionRunResponse> { return (await api.get<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}`)).data; }
-export async function prepareBon8FirstItemReviewWithAi(runId: string): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}/prepare-first-review`, {})).data; }
-export async function approveBon8ProductionRun(runId: string, confirmationId: string): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}/confirmations/${confirmationId}/approve`, {})).data; }
-export async function submitBon8FirstItem(runId: string): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}/submit-first-item`, {})).data; }
-export async function rejectBon8ProductionRun(runId: string, confirmationId: string, rejected_reason: string): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}/confirmations/${confirmationId}/reject`, { rejected_reason })).data; }
-export async function stopBon8ProductionRun(runId: string): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}/stop`, {})).data; }
-export async function planBon8AccountTicks(runId: string): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}/plan-account-ticks`, {})).data; }
-export async function executeBon8RunTickWithAi(runId: string): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}/execute-tick`, {})).data; }
-export async function startBon8RunWorker(runId: string, interval_seconds = 5): Promise<Bon8RunWorkerStatusResponse> { return (await api.post<Bon8RunWorkerStatusResponse>(`/bon8-production/runs/${runId}/worker/start`, { interval_seconds })).data; }
 export async function fetchBon8RunWorkerStatus(runId: string): Promise<Bon8RunWorkerStatusResponse> { return (await api.get<Bon8RunWorkerStatusResponse>(`/bon8-production/runs/${runId}/worker/status`)).data; }
-export async function stopBon8RunWorker(runId: string): Promise<Bon8RunWorkerStatusResponse> { return (await api.post<Bon8RunWorkerStatusResponse>(`/bon8-production/runs/${runId}/worker/stop`, {})).data; }
-export async function markBon8OperationNeeded(runId: string, accountUserId: string): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}/accounts/${accountUserId}/operation-needed`, {})).data; }
-export async function executeBon8AccountTickWithAi(runId: string, accountUserId: string): Promise<Bon8ProductionRunResponse> { return (await api.post<Bon8ProductionRunResponse>(`/bon8-production/runs/${runId}/accounts/${accountUserId}/execute-tick`, {})).data; }
-export async function startTaskAutoRun(payload: { account_user_ids: string[]; task_id: string; node_id?: string; adapter_key?: string; ability_version?: string; write_audit?: boolean }): Promise<TaskAutoRunResponse> { return (await api.post<TaskAutoRunResponse>("/task-auto-runs/start", payload)).data; }
 export async function checkTaskAutoRunPreflight(payload: { account_user_ids: string[]; task_id: string; node_id?: string; adapter_key?: string; ability_version?: string; write_audit?: boolean }): Promise<TaskAutoRunPreflightResponse> { return (await api.post<TaskAutoRunPreflightResponse>("/task-auto-runs/preflight", payload)).data; }
 export async function fetchActiveTaskAutoRun(taskId: string, accountUserIds: string[] = []): Promise<TaskAutoRunResponse | null> { return (await api.get<TaskAutoRunResponse | null>("/task-auto-runs/active", { params: { task_id: taskId, account_user_ids: accountUserIds } })).data; }
 export async function fetchTaskAutoRun(runId: string): Promise<TaskAutoRunResponse> { return (await api.get<TaskAutoRunResponse>(`/task-auto-runs/runs/${runId}`)).data; }
 export async function stopTaskAutoRun(runId: string): Promise<TaskAutoRunResponse> { return (await api.post<TaskAutoRunResponse>(`/task-auto-runs/runs/${runId}/stop`, {})).data; }
 export async function fetchTaskAutoProductionStatus(taskId: string): Promise<AutoProductionStatusResponse> { return (await api.get<AutoProductionStatusResponse>(`/tasks/${taskId}/auto-production/status`)).data; }
-export async function startTaskProduction(taskId: string, payload: StartProductionPayload): Promise<TaskAutoRunResponse> { return (await api.post<TaskAutoRunResponse>(`/tasks/${taskId}/auto-production/production/start`, payload)).data; }
 export async function pauseAutoAnswerRun(runId: string): Promise<TaskAutoRunResponse> { return (await api.post<TaskAutoRunResponse>(`/auto-answer-runs/${runId}/pause`, {})).data; }
 export async function stopAutoAnswerRun(runId: string): Promise<TaskAutoRunResponse> { return (await api.post<TaskAutoRunResponse>(`/auto-answer-runs/${runId}/stop`, {})).data; }
 export async function resumeAutoAnswerRun(runId: string): Promise<TaskAutoRunResponse> { return (await api.post<TaskAutoRunResponse>(`/auto-answer-runs/${runId}/resume`, {})).data; }
@@ -359,8 +411,8 @@ export async function refreshAccountUsernames(): Promise<AccountUsernameRefreshR
 export async function refreshProductionAccounts(): Promise<ProductionAccountRefreshResponse> { return (await api.post<ProductionAccountRefreshResponse>("/accounts/refresh-production", {})).data; }
 export async function refreshProductionAccount(userId: string): Promise<ProductionAccountRefreshResponse> { return (await api.post<ProductionAccountRefreshResponse>(`/accounts/${userId}/refresh-production`, {})).data; }
 export async function fetchTaskAbilityDrafts(): Promise<TaskAbilityDraftListResponse> { return (await api.get<TaskAbilityDraftListResponse>("/task-abilities/drafts")).data; }
-export async function createTaskAbilityDraft(payload: { task_name: string; task_id: string; specific_rules: string; sample_data: string; related_content?: string; system_ai_draft: string; system_ai_trace_id?: string; provider_status?: string }): Promise<TaskAbilityDraftItem> { return (await api.post<TaskAbilityDraftItem>("/task-abilities/drafts", payload)).data; }
-export async function updateTaskAbilityDraft(draftId: string, payload: { task_name?: string; task_id?: string; specific_rules?: string; sample_data?: string; related_content?: string; system_ai_draft?: string; system_ai_trace_id?: string; provider_status?: string }): Promise<TaskAbilityDraftItem> { return (await api.put<TaskAbilityDraftItem>(`/task-abilities/drafts/${draftId}`, payload)).data; }
+export async function createTaskAbilityDraft(payload: { task_name: string; task_id: string; task_type?: string; ability_source?: string; source_config?: Record<string, unknown>; field_mapping?: Record<string, unknown>; validation_rules?: Record<string, unknown>; specific_rules: string; sample_data: string; related_content?: string; system_ai_draft: string; system_ai_trace_id?: string; provider_status?: string }): Promise<TaskAbilityDraftItem> { return (await api.post<TaskAbilityDraftItem>("/task-abilities/drafts", payload)).data; }
+export async function updateTaskAbilityDraft(draftId: string, payload: { task_name?: string; task_id?: string; task_type?: string; ability_source?: string; source_config?: Record<string, unknown>; field_mapping?: Record<string, unknown>; validation_rules?: Record<string, unknown>; specific_rules?: string; sample_data?: string; related_content?: string; system_ai_draft?: string; system_ai_trace_id?: string; provider_status?: string }): Promise<TaskAbilityDraftItem> { return (await api.put<TaskAbilityDraftItem>(`/task-abilities/drafts/${draftId}`, payload)).data; }
 export async function runTaskAbilityDryRun(draftId: string): Promise<TaskAbilityDryRunResponse> { return (await api.post<TaskAbilityDryRunResponse>(`/task-abilities/drafts/${draftId}/dry-run`, {})).data; }
 export async function approveTaskAbilityDraft(draftId: string): Promise<TaskAbilityFlowActionResponse> { return (await api.post<TaskAbilityFlowActionResponse>(`/task-abilities/drafts/${draftId}/approve-draft`, {})).data; }
 export async function runTaskAbilityRealNoSubmit(draftId: string, payload: { account_user_id?: string; use_system_ai_for_vision?: boolean } = {}): Promise<TaskAbilityRealNoSubmitResponse> { return (await api.post<TaskAbilityRealNoSubmitResponse>(`/task-abilities/drafts/${draftId}/real-no-submit`, payload)).data; }

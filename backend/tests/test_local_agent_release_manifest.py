@@ -1,4 +1,5 @@
 import hashlib
+import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
@@ -6,16 +7,21 @@ from pathlib import Path
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+BACKEND_ROOT = PROJECT_ROOT / "backend"
+if str(BACKEND_ROOT) not in sys.path:
+    sys.path.insert(0, str(BACKEND_ROOT))
+
 from app.api.v1.router import api_router
 from app.core.settings import get_settings
 
 
 @contextmanager
-def _api_client_with_release_root(release_root: Path):
+def _api_client_with_release_root(release_root: Path, api_prefix: str = "/api/v1"):
     get_settings.cache_clear()
     try:
         app = FastAPI()
-        app.include_router(api_router, prefix="/api/v1")
+        app.include_router(api_router, prefix=api_prefix)
         with TestClient(app) as client:
             yield client
     finally:
@@ -90,3 +96,29 @@ def test_download_endpoints_return_clear_404_when_packages_are_missing(monkeypat
     for response in [suite, installer, agent, extension]:
         assert response.status_code == 404
         assert response.json()["detail"]["code"] == "LOCAL_AGENT_PACKAGE_NOT_FOUND"
+
+
+def test_latest_release_manifest_download_urls_follow_custom_api_prefix(monkeypatch) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        release_root = Path(tmp)
+        suite = release_root / "aidp-local-suite-0.9.1.zip"
+        installer = release_root / "AIDP-Local-Helper-Setup-0.9.1.exe"
+        agent = release_root / "aidp-local-helper.zip"
+        extension = release_root / "aidp-score-helper-0.9.1.zip"
+        _write_zip_stub(suite, b"suite")
+        installer.write_bytes(b"MZsetup")
+        _write_zip_stub(agent, b"agent")
+        _write_zip_stub(extension, b"extension")
+
+        monkeypatch.setenv("AIDP_API_PREFIX", "/custom-api")
+        monkeypatch.setenv("AIDP_LOCAL_AGENT_RELEASE_ROOT", str(release_root))
+        with _api_client_with_release_root(release_root, api_prefix="/custom-api") as client:
+            response = client.get("/custom-api/local-agent/releases/latest")
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["suite"]["download_url"] == "/custom-api/local-agent/releases/latest/download-suite"
+    assert payload["local_agent"]["download_url"] == "/custom-api/local-agent/releases/latest/download-agent"
+    assert payload["windows_launcher"]["download_url"] == "/custom-api/local-agent/releases/latest/download-suite"
+    assert payload["windows_installer"]["download_url"] == "/custom-api/local-agent/releases/latest/download-installer"
+    assert payload["browser_extension"]["download_url"] == "/custom-api/local-agent/releases/latest/download-extension"

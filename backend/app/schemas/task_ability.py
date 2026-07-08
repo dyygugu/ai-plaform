@@ -7,6 +7,11 @@ from pydantic import BaseModel, Field
 class TaskAbilityDraftCreateRequest(BaseModel):
     task_name: str = Field(min_length=1)
     task_id: str = Field(min_length=1)
+    task_type: str = ""
+    ability_source: str = "platform_form"
+    source_config: dict = Field(default_factory=dict)
+    field_mapping: dict = Field(default_factory=dict)
+    validation_rules: dict = Field(default_factory=dict)
     specific_rules: str = Field(min_length=1)
     sample_data: str = Field(min_length=1)
     related_content: str = ""
@@ -21,6 +26,11 @@ class TaskAbilityDraftRead(BaseModel):
     status: str
     task_name: str
     task_id: str
+    task_type: str = ""
+    ability_source: str = "platform_form"
+    source_config: dict = Field(default_factory=dict)
+    field_mapping: dict = Field(default_factory=dict)
+    validation_rules: dict = Field(default_factory=dict)
     specific_rules: str
     sample_data: str
     related_content: str

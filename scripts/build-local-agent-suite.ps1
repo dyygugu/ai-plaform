@@ -4,6 +4,7 @@ param(
   [string]$LauncherSourcePath = '',
   [string]$InstallerSourcePath = '',
   [string]$ExtensionSourceRoot = '',
+  [string]$ExtensionVersion = '',
   [string]$OutputRoot = '',
   [string]$PlatformBaseUrl = 'http://192.168.10.149:8789',
   [string]$CodeSigningCertSubject = 'CN=AIDP Local Helper Code Signing',
@@ -84,6 +85,20 @@ function Set-ExtensionManifestVersion {
   $manifest.version = $Version
   Write-Utf8File -Path $manifestPath -Content (($manifest | ConvertTo-Json -Depth 50) + "`n")
   $Version
+}
+
+function Get-ExtensionManifestVersion {
+  param([string]$ExtensionDirectory)
+  $manifestPath = Join-Path $ExtensionDirectory 'manifest.json'
+  if (-not (Test-Path -LiteralPath $manifestPath)) {
+    throw "Browser extension manifest not found: $manifestPath"
+  }
+  $manifest = Get-Content -Raw -LiteralPath $manifestPath | ConvertFrom-Json
+  $versionValue = ([string]$manifest.version).Trim()
+  if (-not $versionValue) {
+    throw "Browser extension manifest version is empty: $manifestPath"
+  }
+  $versionValue
 }
 
 function Get-CSharpCompilerPath {
@@ -313,6 +328,9 @@ $helperRoot = (Resolve-Path -LiteralPath $HelperSourceRoot).Path
 $launcherSource = (Resolve-Path -LiteralPath $LauncherSourcePath).Path
 $installerSource = (Resolve-Path -LiteralPath $InstallerSourcePath).Path
 $extensionRoot = (Resolve-Path -LiteralPath $ExtensionSourceRoot).Path
+if (-not $ExtensionVersion) {
+  $ExtensionVersion = Get-ExtensionManifestVersion -ExtensionDirectory $extensionRoot
+}
 if (-not (Test-Path -LiteralPath $OutputRoot)) {
   New-Item -ItemType Directory -Force -Path $OutputRoot | Out-Null
 }
@@ -389,6 +407,7 @@ try {
 
   $defaultConfig = [ordered]@{
     platform_base_url = $normalizedPlatformBaseUrl
+    platform_api_token = ''
     active_platform_url_id = $activePlatformUrlId
     platform_urls = @($platformUrls)
     agent_port = 8790
@@ -409,9 +428,9 @@ param(
 $ErrorActionPreference = 'Stop'
 $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $helper = Join-Path $scriptRoot 'host-launcher.ps1'
-$argsList = @('-Port', $Port, '-HostName', $HostName)
-if ($AutoOpenAccounts) { $argsList += '-AutoOpenAccounts' }
-& $helper @argsList
+$optionalArgs = @()
+if ($AutoOpenAccounts) { $optionalArgs += '-AutoOpenAccounts' }
+& $helper -Port $Port -HostName $HostName @optionalArgs
 '@
   Write-Utf8File -Path (Join-Path $localAgentRoot 'start-local-agent.ps1') -Content ($startScript.TrimStart() + "`n")
 
@@ -443,7 +462,7 @@ Expand-Archive -LiteralPath $UpdateZip -DestinationPath $extractRoot -Force
 
   $preparedExtensionRoot = Join-Path $tempRoot 'prepared-browser-extension\aidp-score-helper'
   Copy-DirectoryContents -SourceDirectory $extensionRoot -DestinationDirectory $preparedExtensionRoot
-  $extensionVersion = Set-ExtensionManifestVersion -ExtensionDirectory $preparedExtensionRoot -Version $Version
+  $extensionVersion = Set-ExtensionManifestVersion -ExtensionDirectory $preparedExtensionRoot -Version $ExtensionVersion
   $extensionUnpackedRoot = Join-Path $extensionStageRoot 'aidp-score-helper'
   Copy-DirectoryContents -SourceDirectory $preparedExtensionRoot -DestinationDirectory $extensionUnpackedRoot
   $extensionZip = Join-Path $extensionStageRoot "aidp-score-helper-$extensionVersion.zip"

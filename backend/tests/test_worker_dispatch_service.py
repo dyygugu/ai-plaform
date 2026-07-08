@@ -11,7 +11,7 @@ from sqlalchemy.pool import StaticPool
 from app.api.v1.router import api_router
 from app.db.base import Base
 from app.db.session import get_db
-from app.models.worker import WorkerAccountTaskLease, WorkerCommandStatus, WorkerLeaseStatus, WorkerStatus
+from app.models.worker import Worker, WorkerAccountTaskLease, WorkerCommandStatus, WorkerLeaseStatus, WorkerStatus
 from app.services.task_rules import utc_now
 from app.services.worker_dispatch_service import (
     assign_unbound_worker_commands,
@@ -143,6 +143,62 @@ class WorkerDispatchServiceTests(unittest.TestCase):
             self.assertTrue(any(item.retry_of_command_id == command.command_id for item in summary["new_commands"]))
         finally:
             db.close()
+
+    def test_platform_worker_ensure_does_not_reenable_disabled_worker(self) -> None:
+        with _api_client() as client:
+            ensured = client.post("/api/v1/workers/platform-worker/ensure", json={"inherited_http_account_slots": 2})
+            self.assertEqual(ensured.status_code, 200, ensured.text)
+            disabled = client.post("/api/v1/workers/platform-worker/disable-reclaim", json={"reason": "人工禁用平台执行器"})
+            self.assertEqual(disabled.status_code, 200, disabled.text)
+            self.assertEqual(disabled.json()["worker_status"], "disabled")
+
+            reensured = client.post("/api/v1/workers/platform-worker/ensure", json={"inherited_http_account_slots": 2})
+
+            self.assertEqual(reensured.status_code, 200, reensured.text)
+            self.assertEqual(reensured.json()["status"], "disabled")
+            self.assertEqual(reensured.json()["effective_http_account_slots"], 0)
+
+    def test_execution_device_disable_reclaims_active_command_and_blocks_execution_gate(self) -> None:
+        with _api_client() as client:
+            worker_id = "worker-device-disable"
+            approved = client.post(f"/api/v1/execution-devices/{worker_id}/approve", json={"manual_slots": 1})
+            self.assertEqual(approved.status_code, 200, approved.text)
+            lease = client.post(
+                "/api/v1/workers/leases/account-task",
+                json={"worker_id": worker_id, "account_user_id": "account-device", "task_id": "task-device"},
+            )
+            self.assertEqual(lease.status_code, 200, lease.text)
+            command = client.post(
+                "/api/v1/workers/commands",
+                json={
+                    "worker_id": worker_id,
+                    "command_type": "produce_account_task",
+                    "account_user_id": "account-device",
+                    "task_id": "task-device",
+                    "payload": {
+                        "mode": "preflight_only",
+                        "preflight_only": True,
+                        "writes_remote": False,
+                        "submits_remote": False,
+                    },
+                },
+            )
+            self.assertEqual(command.status_code, 200, command.text)
+            command_id = command.json()["command_id"]
+            claimed = client.post(f"/api/v1/workers/{worker_id}/commands/claim")
+            self.assertEqual(claimed.status_code, 200, claimed.text)
+
+            disabled = client.post(f"/api/v1/execution-devices/{worker_id}/disable")
+            self.assertEqual(disabled.status_code, 200, disabled.text)
+            self.assertEqual(disabled.json()["status"], "disabled")
+            gate = client.post(f"/api/v1/workers/commands/{command_id}/execution-gate", json={"worker_id": worker_id})
+            self.assertEqual(gate.status_code, 200, gate.text)
+
+            self.assertFalse(gate.json()["can_execute"])
+            self.assertIn("worker_status", {item["key"] for item in gate.json()["checks"] if item["status"] == "failed"})
+            leases = client.get("/api/v1/workers/leases/account-task")
+            self.assertEqual(leases.status_code, 200, leases.text)
+            self.assertTrue(any(item["lease_id"] == lease.json()["lease_id"] and item["status"] == "reclaimed" for item in leases.json()))
 
     def test_assigns_unbound_queued_commands_to_available_platform_worker(self) -> None:
         db = _session()
@@ -389,7 +445,13 @@ class WorkerDispatchServiceTests(unittest.TestCase):
                     "command_type": "produce_account_task",
                     "account_user_id": "7630778503730253600",
                     "task_id": "task-1",
-                    "payload": {"source": "route-test"},
+                    "payload": {
+                        "mode": "preflight_only",
+                        "preflight_only": True,
+                        "source": "route-test",
+                        "writes_remote": False,
+                        "submits_remote": False,
+                    },
                 },
             )
             self.assertEqual(command.status_code, 200, command.text)
@@ -415,6 +477,87 @@ class WorkerDispatchServiceTests(unittest.TestCase):
             self.assertEqual(reclaim.json()["requeued_commands"], 1)
             self.assertEqual(len(reclaim.json()["new_commands"]), 1)
 
+    def test_dispatch_route_rejects_non_preflight_production_command_without_authorization(self) -> None:
+        with _api_client() as client:
+            platform_worker = client.post(
+                "/api/v1/workers/platform-worker/ensure",
+                json={"inherited_http_account_slots": 2},
+            )
+            self.assertEqual(platform_worker.status_code, 200, platform_worker.text)
+
+            unsafe = client.post(
+                "/api/v1/workers/commands",
+                json={
+                    "worker_id": "platform-worker",
+                    "command_type": "produce_account_task",
+                    "account_user_id": "account-1",
+                    "task_id": "task-1",
+                    "payload": {"mode": "execute_once", "preflight_only": False},
+                },
+            )
+            self.assertEqual(unsafe.status_code, 400, unsafe.text)
+            self.assertIn("preflight_only", unsafe.text)
+
+            safe = client.post(
+                "/api/v1/workers/commands",
+                json={
+                    "worker_id": "platform-worker",
+                    "command_type": "produce_account_task",
+                    "account_user_id": "account-1",
+                    "task_id": "task-1",
+                    "payload": {
+                        "mode": "preflight_only",
+                        "preflight_only": True,
+                        "writes_remote": False,
+                        "submits_remote": False,
+                    },
+                },
+            )
+            self.assertEqual(safe.status_code, 200, safe.text)
+            self.assertEqual(safe.json()["payload"]["mode"], "preflight_only")
+            self.assertTrue(safe.json()["payload"]["preflight_only"])
+            self.assertFalse(safe.json()["payload"]["writes_remote"])
+            self.assertFalse(safe.json()["payload"]["submits_remote"])
+
+    def test_dispatch_route_rejects_preflight_command_without_explicit_remote_false_flags(self) -> None:
+        with _api_client() as client:
+            platform_worker = client.post(
+                "/api/v1/workers/platform-worker/ensure",
+                json={"inherited_http_account_slots": 2},
+            )
+            self.assertEqual(platform_worker.status_code, 200, platform_worker.text)
+
+            missing_flags = client.post(
+                "/api/v1/workers/commands",
+                json={
+                    "worker_id": "platform-worker",
+                    "command_type": "produce_account_task",
+                    "account_user_id": "account-1",
+                    "task_id": "task-1",
+                    "payload": {"mode": "preflight_only", "preflight_only": True},
+                },
+            )
+            self.assertEqual(missing_flags.status_code, 400, missing_flags.text)
+            self.assertIn("writes_remote=false", missing_flags.text)
+
+            unsafe_flags = client.post(
+                "/api/v1/workers/commands",
+                json={
+                    "worker_id": "platform-worker",
+                    "command_type": "produce_account_task",
+                    "account_user_id": "account-1",
+                    "task_id": "task-1",
+                    "payload": {
+                        "mode": "preflight_only",
+                        "preflight_only": True,
+                        "writes_remote": True,
+                        "submits_remote": False,
+                    },
+                },
+            )
+            self.assertEqual(unsafe_flags.status_code, 400, unsafe_flags.text)
+            self.assertIn("writes_remote=false", unsafe_flags.text)
+
     def test_dispatch_routes_timeout_scan_requeues_and_late_result_is_audit_only(self) -> None:
         with _api_client() as client:
             platform_worker = client.post(
@@ -429,6 +572,12 @@ class WorkerDispatchServiceTests(unittest.TestCase):
                     "command_type": "produce_account_task",
                     "account_user_id": "7630778503730253600",
                     "task_id": "task-timeout",
+                    "payload": {
+                        "mode": "preflight_only",
+                        "preflight_only": True,
+                        "writes_remote": False,
+                        "submits_remote": False,
+                    },
                 },
             )
             self.assertEqual(command.status_code, 200, command.text)
@@ -475,7 +624,12 @@ class WorkerDispatchServiceTests(unittest.TestCase):
                     "command_type": "produce_account_task",
                     "account_user_id": "7630778503730253600",
                     "task_id": "task-assign-route",
-                    "payload": {"mode": "preflight_only"},
+                    "payload": {
+                        "mode": "preflight_only",
+                        "preflight_only": True,
+                        "writes_remote": False,
+                        "submits_remote": False,
+                    },
                 },
             )
             self.assertEqual(command.status_code, 200, command.text)
@@ -515,7 +669,12 @@ class WorkerDispatchServiceTests(unittest.TestCase):
                     "command_type": "produce_account_task",
                     "account_user_id": "7630778503730253600",
                     "task_id": "task-gate-route",
-                    "payload": {"mode": "execute_once"},
+                    "payload": {
+                        "mode": "preflight_only",
+                        "preflight_only": True,
+                        "writes_remote": False,
+                        "submits_remote": False,
+                    },
                 },
             )
             self.assertEqual(command.status_code, 200, command.text)
@@ -577,6 +736,164 @@ class WorkerDispatchServiceTests(unittest.TestCase):
             claimed = client.post("/api/v1/workers/worker-new-001/commands/claim")
             self.assertEqual(claimed.status_code, 200, claimed.text)
             self.assertEqual(claimed.json()["command_type"], "health_probe")
+
+    def test_approved_worker_reregister_does_not_reset_to_pending(self) -> None:
+        with _api_client() as client:
+            registered = client.post(
+                "/api/v1/workers/register",
+                json={
+                    "worker_id": "worker-approved-reregister",
+                    "display_name": "可调度 Worker",
+                    "version": "0.9.1",
+                    "estimated_http_account_slots": 3,
+                },
+            )
+            self.assertEqual(registered.status_code, 200, registered.text)
+            approved = client.post(
+                "/api/v1/workers/worker-approved-reregister/approve",
+                json={"configured_http_account_slots": 2},
+            )
+            self.assertEqual(approved.status_code, 200, approved.text)
+            self.assertEqual(approved.json()["status"], "online")
+            self.assertEqual(approved.json()["effective_http_account_slots"], 2)
+
+            reregistered = client.post(
+                "/api/v1/workers/register",
+                json={
+                    "worker_id": "worker-approved-reregister",
+                    "display_name": "可调度 Worker",
+                    "version": "0.9.1",
+                    "estimated_http_account_slots": 3,
+                },
+            )
+
+            self.assertEqual(reregistered.status_code, 200, reregistered.text)
+            self.assertEqual(reregistered.json()["status"], "online")
+            self.assertEqual(reregistered.json()["configured_http_account_slots"], 2)
+            self.assertEqual(reregistered.json()["effective_http_account_slots"], 2)
+
+    def test_blocked_worker_heartbeat_and_error_event_do_not_restore_claim_ability(self) -> None:
+        with _api_client() as client:
+            worker_id = "worker-blocked-status"
+            registered = client.post(
+                "/api/v1/workers/register",
+                json={
+                    "worker_id": worker_id,
+                    "display_name": "禁用状态 Worker",
+                    "version": "0.9.1",
+                    "estimated_http_account_slots": 2,
+                },
+            )
+            self.assertEqual(registered.status_code, 200, registered.text)
+            approved = client.post(f"/api/v1/workers/{worker_id}/approve", json={"configured_http_account_slots": 2})
+            self.assertEqual(approved.status_code, 200, approved.text)
+            disabled = client.post(f"/api/v1/workers/{worker_id}/disable-reclaim", json={"reason": "人工禁用"})
+            self.assertEqual(disabled.status_code, 200, disabled.text)
+            self.assertEqual(disabled.json()["worker_status"], "disabled")
+            command = client.post("/api/v1/workers/commands", json={"worker_id": worker_id, "command_type": "health_probe"})
+            self.assertEqual(command.status_code, 200, command.text)
+
+            heartbeat = client.post("/api/v1/workers/heartbeat", json={"worker_id": worker_id, "version": "0.9.2"})
+            self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+            self.assertEqual(heartbeat.json()["status"], "disabled")
+            blocked_claim = client.post(f"/api/v1/workers/{worker_id}/commands/claim")
+            self.assertEqual(blocked_claim.status_code, 403, blocked_claim.text)
+
+            event = client.post(
+                "/api/v1/workers/events",
+                json={
+                    "worker_id": worker_id,
+                    "event_type": "event_report",
+                    "severity": "error",
+                    "message": "disabled worker still reports background error",
+                    "stage": "worker_runtime",
+                    "step": "heartbeat",
+                    "error_code": "WORKER_EXCEPTION",
+                },
+            )
+            self.assertEqual(event.status_code, 200, event.text)
+            detail = client.get(f"/api/v1/workers/{worker_id}")
+            self.assertEqual(detail.status_code, 200, detail.text)
+            self.assertEqual(detail.json()["worker"]["status"], "disabled")
+            blocked_claim_after_event = client.post(f"/api/v1/workers/{worker_id}/commands/claim")
+            self.assertEqual(blocked_claim_after_event.status_code, 403, blocked_claim_after_event.text)
+
+    def test_rejected_worker_heartbeat_and_error_event_do_not_restore_claim_ability(self) -> None:
+        with _api_client() as client:
+            worker_id = "worker-rejected-status"
+            registered = client.post(
+                "/api/v1/workers/register",
+                json={
+                    "worker_id": worker_id,
+                    "display_name": "拒绝状态 Worker",
+                    "version": "0.9.1",
+                    "estimated_http_account_slots": 2,
+                },
+            )
+            self.assertEqual(registered.status_code, 200, registered.text)
+            db = next(client.app.dependency_overrides[get_db]())
+            try:
+                worker = db.query(Worker).filter_by(worker_id=worker_id).one()
+                worker.status = WorkerStatus.REJECTED
+                worker.disabled_reason = "人工拒绝"
+                db.commit()
+            finally:
+                db.close()
+            command = client.post("/api/v1/workers/commands", json={"worker_id": worker_id, "command_type": "health_probe"})
+            self.assertEqual(command.status_code, 200, command.text)
+
+            heartbeat = client.post(
+                "/api/v1/workers/heartbeat",
+                json={"worker_id": worker_id, "version": "0.9.2", "last_error": "still running locally"},
+            )
+            self.assertEqual(heartbeat.status_code, 200, heartbeat.text)
+            self.assertEqual(heartbeat.json()["status"], "rejected")
+            blocked_claim = client.post(f"/api/v1/workers/{worker_id}/commands/claim")
+            self.assertEqual(blocked_claim.status_code, 403, blocked_claim.text)
+
+            event = client.post(
+                "/api/v1/workers/events",
+                json={
+                    "worker_id": worker_id,
+                    "event_type": "event_report",
+                    "severity": "critical",
+                    "message": "rejected worker still reports background error",
+                    "stage": "worker_runtime",
+                    "step": "heartbeat",
+                    "error_code": "WORKER_EXCEPTION",
+                },
+            )
+            self.assertEqual(event.status_code, 200, event.text)
+            detail = client.get(f"/api/v1/workers/{worker_id}")
+            self.assertEqual(detail.status_code, 200, detail.text)
+            self.assertEqual(detail.json()["worker"]["status"], "rejected")
+            blocked_claim_after_event = client.post(f"/api/v1/workers/{worker_id}/commands/claim")
+            self.assertEqual(blocked_claim_after_event.status_code, 403, blocked_claim_after_event.text)
+
+    def test_legacy_claim_task_rejects_blocked_workers(self) -> None:
+        with _api_client() as client:
+            for status in ("pending_approval", "disabled", "rejected"):
+                worker_id = f"worker-legacy-claim-{status}"
+                registered = client.post(
+                    "/api/v1/workers/register",
+                    json={"worker_id": worker_id, "display_name": worker_id, "version": "0.9.1", "estimated_http_account_slots": 1},
+                )
+                self.assertEqual(registered.status_code, 200, registered.text)
+                if status == "disabled":
+                    approved = client.post(f"/api/v1/workers/{worker_id}/approve", json={"configured_http_account_slots": 1})
+                    self.assertEqual(approved.status_code, 200, approved.text)
+                    disabled = client.post(f"/api/v1/workers/{worker_id}/disable-reclaim", json={"reason": "人工禁用"})
+                    self.assertEqual(disabled.status_code, 200, disabled.text)
+                elif status == "rejected":
+                    rejected = client.post(f"/api/v1/execution-devices/{worker_id}/reject")
+                    self.assertEqual(rejected.status_code, 200, rejected.text)
+
+                claim = client.post(
+                    f"/api/v1/workers/{worker_id}/claim-task",
+                    json={"task_id": "task-legacy", "account_user_id": "account-legacy"},
+                )
+
+                self.assertEqual(claim.status_code, 403, claim.text)
 
     def test_recovery_routes_scan_auto_cooldown_and_allow_manual_recovery(self) -> None:
         with _api_client() as client:

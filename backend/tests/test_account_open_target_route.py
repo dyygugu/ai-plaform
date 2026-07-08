@@ -1,10 +1,20 @@
 import importlib
 import json
+import sys
 from urllib.parse import parse_qs, urlparse
 
 from fastapi.testclient import TestClient
 
 from app.core.settings import get_settings
+
+
+def _create_app_with_reloaded_runtime():
+    get_settings.cache_clear()
+    for module_name in list(sys.modules):
+        if module_name in {"app.main", "app.db.init_db", "app.db.session"} or module_name == "app.api.v1" or module_name.startswith("app.api.v1."):
+            sys.modules.pop(module_name, None)
+    main_module = importlib.import_module("app.main")
+    return main_module.create_app()
 
 
 def test_open_target_uses_public_monitor_url_and_encodes_query(tmp_path, monkeypatch) -> None:
@@ -26,8 +36,7 @@ def test_open_target_uses_public_monitor_url_and_encodes_query(tmp_path, monkeyp
     get_settings.cache_clear()
 
     try:
-        main_module = importlib.import_module("app.main")
-        app = main_module.create_app()
+        app = _create_app_with_reloaded_runtime()
         with TestClient(app) as client:
             response = client.post(f"/api/v1/accounts/{user_id}/open-target/task")
     finally:

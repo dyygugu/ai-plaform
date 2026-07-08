@@ -1,6 +1,7 @@
 import importlib
 import json
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -8,16 +9,41 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 
 
+def _forget_module(module_name: str) -> None:
+    sys.modules.pop(module_name, None)
+    parent_name, _, child_name = module_name.rpartition(".")
+    parent = sys.modules.get(parent_name)
+    if parent is not None and child_name:
+        try:
+            delattr(parent, child_name)
+        except AttributeError:
+            pass
+
+
+def _create_app(tmpdir: str):
+    os.environ["AIDP_DATABASE_URL"] = f"sqlite+pysqlite:///{Path(tmpdir) / 'aidp-test.db'}"
+    os.environ["AIDP_OPERATION_RECORDING_ROOT"] = str(Path(tmpdir) / "operation-recordings")
+    os.environ["AIDP_AUTO_CREATE_TABLES"] = "true"
+    settings_module = importlib.import_module("app.core.settings")
+    settings_module.get_settings.cache_clear()
+    for module_name in (
+        "app.main",
+        "app.api.v1.router",
+        "app.api.v1.routes.operation_recordings",
+        "app.services.operation_recording_service",
+        "app.services.learning_package_service",
+        "app.db.init_db",
+        "app.db.session",
+    ):
+        _forget_module(module_name)
+    main_module = importlib.import_module("app.main")
+    return main_module.create_app()
+
+
 class OperationRecordingTests(unittest.TestCase):
     def test_upload_full_recording_stores_sanitized_artifact(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            os.environ["AIDP_DATABASE_URL"] = f"sqlite+pysqlite:///{Path(tmpdir) / 'aidp-test.db'}"
-            os.environ["AIDP_OPERATION_RECORDING_ROOT"] = str(Path(tmpdir) / "operation-recordings")
-            os.environ["AIDP_AUTO_CREATE_TABLES"] = "true"
-            settings_module = importlib.import_module("app.core.settings")
-            settings_module.get_settings.cache_clear()
-            main_module = importlib.import_module("app.main")
-            app = main_module.create_app()
+            app = _create_app(tmpdir)
 
             with TestClient(app) as client:
                 response = client.post(
@@ -54,13 +80,7 @@ class OperationRecordingTests(unittest.TestCase):
 
     def test_upload_recording_reports_operation_claim_candidates(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            os.environ["AIDP_DATABASE_URL"] = f"sqlite+pysqlite:///{Path(tmpdir) / 'aidp-test.db'}"
-            os.environ["AIDP_OPERATION_RECORDING_ROOT"] = str(Path(tmpdir) / "operation-recordings")
-            os.environ["AIDP_AUTO_CREATE_TABLES"] = "true"
-            settings_module = importlib.import_module("app.core.settings")
-            settings_module.get_settings.cache_clear()
-            main_module = importlib.import_module("app.main")
-            app = main_module.create_app()
+            app = _create_app(tmpdir)
 
             with TestClient(app) as client:
                 response = client.post(
@@ -100,13 +120,7 @@ class OperationRecordingTests(unittest.TestCase):
 
     def test_upload_recording_registers_task_learning_package(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            os.environ["AIDP_DATABASE_URL"] = f"sqlite+pysqlite:///{Path(tmpdir) / 'aidp-test.db'}"
-            os.environ["AIDP_OPERATION_RECORDING_ROOT"] = str(Path(tmpdir) / "operation-recordings")
-            os.environ["AIDP_AUTO_CREATE_TABLES"] = "true"
-            settings_module = importlib.import_module("app.core.settings")
-            settings_module.get_settings.cache_clear()
-            main_module = importlib.import_module("app.main")
-            app = main_module.create_app()
+            app = _create_app(tmpdir)
 
             with TestClient(app) as client:
                 response = client.post(
@@ -141,13 +155,7 @@ class OperationRecordingTests(unittest.TestCase):
 
     def test_learning_package_summary_includes_recording_context(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            os.environ["AIDP_DATABASE_URL"] = f"sqlite+pysqlite:///{Path(tmpdir) / 'aidp-test.db'}"
-            os.environ["AIDP_OPERATION_RECORDING_ROOT"] = str(Path(tmpdir) / "operation-recordings")
-            os.environ["AIDP_AUTO_CREATE_TABLES"] = "true"
-            settings_module = importlib.import_module("app.core.settings")
-            settings_module.get_settings.cache_clear()
-            main_module = importlib.import_module("app.main")
-            app = main_module.create_app()
+            app = _create_app(tmpdir)
             learning_package_module = importlib.import_module("app.services.learning_package_service")
 
             request_body = {
@@ -213,13 +221,7 @@ class OperationRecordingTests(unittest.TestCase):
 
     def test_aidp_page_origin_can_upload_recording_directly(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            os.environ["AIDP_DATABASE_URL"] = f"sqlite+pysqlite:///{Path(tmpdir) / 'aidp-test.db'}"
-            os.environ["AIDP_OPERATION_RECORDING_ROOT"] = str(Path(tmpdir) / "operation-recordings")
-            os.environ["AIDP_AUTO_CREATE_TABLES"] = "true"
-            settings_module = importlib.import_module("app.core.settings")
-            settings_module.get_settings.cache_clear()
-            main_module = importlib.import_module("app.main")
-            app = main_module.create_app()
+            app = _create_app(tmpdir)
 
             with TestClient(app) as client:
                 response = client.options(
@@ -236,13 +238,7 @@ class OperationRecordingTests(unittest.TestCase):
 
     def test_aidp_page_origin_private_network_preflight_allows_local_upload(self) -> None:
         with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmpdir:
-            os.environ["AIDP_DATABASE_URL"] = f"sqlite+pysqlite:///{Path(tmpdir) / 'aidp-test.db'}"
-            os.environ["AIDP_OPERATION_RECORDING_ROOT"] = str(Path(tmpdir) / "operation-recordings")
-            os.environ["AIDP_AUTO_CREATE_TABLES"] = "true"
-            settings_module = importlib.import_module("app.core.settings")
-            settings_module.get_settings.cache_clear()
-            main_module = importlib.import_module("app.main")
-            app = main_module.create_app()
+            app = _create_app(tmpdir)
 
             with TestClient(app) as client:
                 response = client.options(

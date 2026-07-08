@@ -148,6 +148,70 @@ def test_local_helper_defaults_to_editable_nas_platform_urls() -> None:
     assert "$fallbackSettings = @{" in text
 
 
+def test_local_helper_does_not_hardcode_api_v1_suffix_for_platform_calls() -> None:
+    helper = _helper_source()
+    if not helper.is_file():
+        pytest.skip(f"legacy helper source is not available: {helper}")
+    text = helper.read_text(encoding="utf-8")
+
+    assert "function Get-PlatformApiBaseUrl" in text
+    assert "function Get-PlatformApiPrefix" in text
+    assert "$baseUrl + '/api/v1/operation-recordings'" not in text
+    assert "$baseUrl = $baseUrl + '/api/v1'" not in text
+
+
+def test_local_helper_powershell_source_parses_without_duplicate_hash_keys() -> None:
+    helper = _helper_source()
+    if not helper.is_file():
+        pytest.skip(f"legacy helper source is not available: {helper}")
+    import shutil
+    import subprocess
+
+    shell = shutil.which("pwsh") or shutil.which("powershell")
+    assert shell, "PowerShell is required to parse local helper source"
+
+    result = subprocess.run(
+        [
+            shell,
+            "-NoProfile",
+            "-Command",
+            f"$tokens = $null; $errors = $null; $null = [System.Management.Automation.Language.Parser]::ParseFile('{helper}', [ref]$tokens, [ref]$errors); if ($errors.Count) {{ $errors | ForEach-Object {{ $_.Message }}; exit 1 }}",
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=30,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_local_helper_default_settings_has_single_api_prefix_key() -> None:
+    helper = _helper_source()
+    if not helper.is_file():
+        pytest.skip(f"legacy helper source is not available: {helper}")
+    text = helper.read_text(encoding="utf-8")
+    default_settings_start = text.index("function Get-DefaultHelperSettings")
+    default_settings_end = text.index("function Normalize-PlatformUrlText", default_settings_start)
+    default_settings = text[default_settings_start:default_settings_end]
+
+    assert default_settings.count("platform_api_prefix") == 1
+
+
+def test_local_helper_api_prefix_normalization_matches_backend() -> None:
+    helper = _helper_source()
+    if not helper.is_file():
+        pytest.skip(f"legacy helper source is not available: {helper}")
+    text = helper.read_text(encoding="utf-8")
+    function_start = text.index("function Get-PlatformApiPrefix")
+    function_end = text.index("function Get-PlatformApiBaseUrl", function_start)
+    function_body = text[function_start:function_end]
+
+    assert "-replace '/+', '/'" in function_body
+    assert "'/api/v1'" in function_body
+
+
 def test_suite_builder_prefers_tracked_local_agent_source() -> None:
     script = _repo_root() / "scripts" / "build-local-agent-suite.ps1"
     text = script.read_text(encoding="utf-8")

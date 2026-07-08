@@ -10,7 +10,8 @@
 2. 双击安装，按中文安装向导选择安装位置、桌面快捷方式、开始菜单和开机自启动。
 3. 安装完成后打开 `AIDP 本机助手`。
 4. 在控制台选择或填写平台地址，默认 NAS 地址为 `http://192.168.10.149:8789`。
-5. 按页面提示安装浏览器插件、开启执行能力、设置开机自启动。
+5. 如果平台开启 API Token 鉴权，在“连接设置”里填写平台 API Token。
+6. 按页面提示安装浏览器插件、开启执行能力、设置开机自启动。
 
 便携方式：
 
@@ -37,7 +38,7 @@
 - API Key 只放在本机环境变量，不写入浏览器扩展或 NAS。
 - 默认 Base URL：http://api.51gugu.uk/v1。
 - 默认模型：gpt-5.4-mini。
-- 需要设置环境变量：AIDP_AI_API_KEY；可选覆盖：AIDP_AI_BASE_URL、AIDP_AI_MODEL。
+- 需要设置环境变量：AIDP_AI_API_KEY 或 OPENAI_API_KEY；可选覆盖：AIDP_AI_BASE_URL、AIDP_AI_MODEL。
 - 健康检查会返回 aiScoreSupported、aiScoreConfigured、aiScoreModel。
 
 ## 日志与排障
@@ -49,25 +50,28 @@
 ## 学习包上传链路
 
 - 评分插件的操作录制只连接本机助手：`http://127.0.0.1:8790/api/recordings/upload`。
-- helper 收到学习包后，会按 `platform_base_url` 转发到平台 `/api/v1/operation-recordings`。
-- `platform_base_url` 可来自环境变量 `AIDP_PLATFORM_BASE_URL`，也可写在 `config/helper-settings.json`：
+- helper 收到学习包后，会按 `platform_base_url + platform_api_prefix` 转发到平台 `/operation-recordings`。
+- `platform_base_url` 可来自环境变量 `AIDP_PLATFORM_BASE_URL`，也可写在 `config/helper-settings.json`。
+- `platform_api_token` 可来自环境变量 `AIDP_PLATFORM_API_TOKEN` / `AIDP_BROWSER_EXTENSION_API_TOKEN`，也可在控制台保存到 `config/helper-settings.json`：
 
 ```json
 {
   "platform_base_url": "http://127.0.0.1:8789",
+  "platform_api_token": "your-token",
   "recording_upload_retry_count": 2,
   "recording_upload_timeout_sec": 20
 }
 ```
 
+- Token 只用于请求头 `X-AIDP-API-Token`，控制台配置响应和技术日志不会回显明文。
 - 当平台暂时不可达时，helper 会把学习包写入本地 `queue/operation-recordings/pending/`，并把失败快照写入 `queue/operation-recordings/failed/`。
 - 后续新的学习包上传会自动先重试 pending 队列；也可手动调用 `http://127.0.0.1:8790/api/recordings/retry-pending`。
 - `http://127.0.0.1:8790/api/health` 现在会返回 `platformBaseUrl`、`recordingUploadQueuePending`、`recordingUploadFailedCache` 等字段，便于现场排障。
 
 
-## 当前项目内置配置
+## 当前项目默认配置
 
-- 本项目个人版已内置默认 `AIDP_AI_API_KEY`、`AIDP_AI_BASE_URL=http://api.51gugu.uk/v1`、`AIDP_AI_MODEL=gpt-5.4-mini`。
-- 环境变量仍有最高优先级；如果以后更换 key，只要设置环境变量即可覆盖内置值。
+- 发布包不内置 API Key；请在本机环境变量中设置 `AIDP_AI_API_KEY` 或 `OPENAI_API_KEY`。
+- 默认 `AIDP_AI_BASE_URL=http://api.51gugu.uk/v1`、`AIDP_AI_MODEL=gpt-5.4-mini`；如需更换，设置环境变量覆盖。
 
 

@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy.orm import Session
 
 from app.api.v1.routes.task_auto_runs import _adapters, _state_dir
+from app.core.security import legacy_production_routes_blocked
 from app.db.session import get_db
 from app.schemas.auto_production import AutoProductionStatusResponse, StartAutoProductionRequest
 from app.schemas.task_auto_runs import TaskAutoRunResponse
@@ -17,6 +18,8 @@ def read_auto_production_status(task_id: str, db: Session = Depends(get_db)) -> 
 
 @router.post("/production/start", response_model=TaskAutoRunResponse)
 def start_task_production(task_id: str, payload: StartAutoProductionRequest, request: Request, db: Session = Depends(get_db)) -> TaskAutoRunResponse:
+    if legacy_production_routes_blocked():
+        raise HTTPException(status_code=410, detail="旧任务生产入口已关闭。请使用 AI 标注能力工作台 Step4 的生产运行入口。")
     try:
         return start_auto_production(db, task_id, payload, adapters=_adapters(request), state_dir=_state_dir(request))
     except AutoProductionError as exc:

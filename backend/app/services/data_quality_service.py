@@ -21,6 +21,7 @@ from app.schemas.data_quality import (
     DataQualitySummaryResponse,
     EarningsContractItem,
 )
+from app.services.api_paths import api_path, api_paths
 from app.services.audit_service import write_audit
 from app.services.earnings_service import list_earnings
 from app.services.task_rules import utc_now
@@ -29,6 +30,7 @@ EXPECTED_ACCOUNT_COUNT = 7
 
 
 def build_data_quality_summary(db: Session) -> DataQualitySummaryResponse:
+    settings = get_settings()
     accounts = list(db.scalars(select(AidpAccount).order_by(AidpAccount.user_id.asc())))
     tasks = list(db.scalars(select(TaskCatalogItem).order_by(TaskCatalogItem.task_id.asc())))
     earnings_rows = list_earnings(db)
@@ -51,7 +53,7 @@ def build_data_quality_summary(db: Session) -> DataQualitySummaryResponse:
             status="passed" if len(production_accounts) == EXPECTED_ACCOUNT_COUNT else "failed",
             expected=f"{EXPECTED_ACCOUNT_COUNT} 个生产账号",
             actual=f"生产账号 {len(production_accounts)} 个，停用/非生产 {non_production_count} 个",
-            evidence_path="/api/v1/accounts",
+            evidence_path=api_path("/accounts", settings),
             message="8789 原生生产账号基线已写入新库；停用/非生产账号不计入失败。" if len(production_accounts) == EXPECTED_ACCOUNT_COUNT else "生产账号数量与 8789 原生基线不一致。",
         ),
         DataQualityCheckItem(
@@ -60,7 +62,7 @@ def build_data_quality_summary(db: Session) -> DataQualitySummaryResponse:
             status="passed" if tasks and has_short_names else "failed",
             expected="任务简称、任务 ID、待处理数字均可核验",
             actual=f"{len(tasks)} 条任务，short_name_ok={has_short_names}",
-            evidence_path="/api/v1/tasks/catalog",
+            evidence_path=api_path("/tasks/catalog", settings),
             message="任务目录包含简称和当前待处理数字。" if tasks else "任务目录为空。",
         ),
         DataQualityCheckItem(
@@ -69,7 +71,7 @@ def build_data_quality_summary(db: Session) -> DataQualitySummaryResponse:
             status="passed" if numeric_pending_ok else "failed",
             expected="pending_raw 可解析为非负数字",
             actual=f"pending_numeric_ok={numeric_pending_ok}",
-            evidence_path="/api/v1/tasks/catalog",
+            evidence_path=api_path("/tasks/catalog", settings),
             message="待处理字段保持数字口径，不再展示节点名称占位。",
         ),
         DataQualityCheckItem(
@@ -78,7 +80,7 @@ def build_data_quality_summary(db: Session) -> DataQualitySummaryResponse:
             status="passed" if account_ids and account_ids.issubset(earning_account_ids) else "failed",
             expected="收益导出覆盖 7 个账号",
             actual=f"收益账号 {len(earning_account_ids)} 个",
-            evidence_path="/api/v1/data-quality/export",
+            evidence_path=api_path("/data-quality/export", settings),
             message="收益三项、今日收益、小时收益按账号维度补齐。",
         ),
         DataQualityCheckItem(
@@ -87,7 +89,7 @@ def build_data_quality_summary(db: Session) -> DataQualitySummaryResponse:
             status="passed" if workers and audit_count >= 1 else "warning",
             expected="至少 1 个 Worker 与审计事件",
             actual=f"workers={len(workers)}，audit_events={audit_count}",
-            evidence_path="/api/v1/workers,/api/v1/audit/logs",
+            evidence_path=api_paths("/workers", "/audit/logs", settings=settings),
             message="Worker 与审计可作为数据闭环旁证；warning 不触发外部系统。",
         ),
         DataQualityCheckItem(
@@ -271,7 +273,7 @@ def _write_tasks_sheet(workbook: Workbook, tasks: list[TaskCatalogItem]) -> None
             _parse_pending(task.pending_raw),
             task.visibility.value,
             task.last_task_page_seen_at.isoformat() if task.last_task_page_seen_at else "",
-            "/api/v1/tasks/catalog",
+            api_path("/tasks/catalog"),
         ])
 
 

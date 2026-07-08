@@ -1,7 +1,6 @@
 import json
 import os
 import re
-import base64
 import time
 import hashlib
 from contextlib import suppress
@@ -32,6 +31,8 @@ from app.services.task_capability_service import TaskCapabilityError, build_http
 RESEARCH_CHART_TASK_ID = "7638992213846740763"
 RESEARCH_CHART_FULL_DATASET_TASK_ID = "7639402643386830630"
 RESEARCH_CHART_TASK_IDS = {RESEARCH_CHART_TASK_ID, RESEARCH_CHART_FULL_DATASET_TASK_ID}
+TASK_TYPE_3D_RUBRIC_EVAL = "3d_rubric_eval"
+ABILITY_SOURCE_PLATFORM_FORM = "platform_form"
 BON8_TASK_ID = "7637771731901861641"
 BON8_TASK_ABILITY_DRAFT_ID = "bon8-task-ability"
 BON8_TASK_NAME = "RFT人标支持VLM Coding（bon8草图与流程图）-正式队列"
@@ -57,6 +58,11 @@ UNEXPLAINED_RESEARCH_CHART_REASONS = {
     "很像",
     "还原好",
 }
+STEP3_HUMAN_UNLIKELY_PRECISION_PATTERN = re.compile(
+    r"#[0-9a-f]{3,8}\b|\brgba?\s*\(|\bhsla?\s*\(|\b\d+(?:\.\d+)?\s*(?:px|像素|%|mm|cm|deg|°)\b|坐标|色号|十六进制色值",
+    re.IGNORECASE,
+)
+STEP3_RUBRIC_ARRAY_KEYS = ("rubric_items", "rubrics", "rubric_results", "criteria", "criteria_results")
 
 
 def list_task_ability_drafts() -> TaskAbilityDraftListResponse:
@@ -85,22 +91,28 @@ def get_task_ability_draft_by_task(task_id: str, *, store_path: Optional[Path] =
 def get_enabled_task_ability_draft(task_id: str, *, store_path: Optional[Path] = None) -> dict[str, Any]:
     path = store_path or _store_path()
     items = _load_items_from_path(path)
-    task_id_text = str(task_id)
-    return next(
-        (
-            item
-            for item in items
-            if isinstance(item, dict)
-            and str(item.get("task_id") or "") == task_id_text
-            and bool(item.get("capability_enabled"))
-            and str(item.get("flow_stage") or "") == "capability_enabled"
-        ),
-        {},
-    )
+    try:
+        draft = _find_latest_draft_by_task_id(items, task_id)
+    except TaskAbilityFlowError:
+        return {}
+    if bool(draft.get("capability_enabled")) and str(draft.get("flow_stage") or "") == "capability_enabled":
+        return draft
+    return {}
 
 
-def create_task_ability_draft(payload: TaskAbilityDraftCreateRequest) -> TaskAbilityDraftRead:
-    items = _load_items()
+def is_task_ability_3d_rubric_draft(draft_id: str, *, store_path: Optional[Path] = None) -> bool:
+    path = store_path or _store_path()
+    items = _load_items_from_path(path)
+    try:
+        draft = _find_draft(items, draft_id)
+    except TaskAbilityFlowError:
+        return False
+    return _is_3d_rubric_draft(draft)
+
+
+def create_task_ability_draft(payload: TaskAbilityDraftCreateRequest, *, store_path: Optional[Path] = None) -> TaskAbilityDraftRead:
+    path = store_path or _store_path()
+    items = _load_items_from_path(path)
     now = _now()
     draft = TaskAbilityDraftRead(
         id=uuid4().hex,
@@ -108,6 +120,11 @@ def create_task_ability_draft(payload: TaskAbilityDraftCreateRequest) -> TaskAbi
         status="草稿",
         task_name=payload.task_name.strip(),
         task_id=payload.task_id.strip(),
+        task_type=str(payload.task_type or "").strip(),
+        ability_source=str(payload.ability_source or ABILITY_SOURCE_PLATFORM_FORM).strip() or ABILITY_SOURCE_PLATFORM_FORM,
+        source_config=dict(payload.source_config or {}),
+        field_mapping=dict(payload.field_mapping or {}),
+        validation_rules=dict(payload.validation_rules or {}),
         specific_rules=payload.specific_rules.strip(),
         sample_data=payload.sample_data.strip(),
         related_content=payload.related_content.strip(),
@@ -123,7 +140,7 @@ def create_task_ability_draft(payload: TaskAbilityDraftCreateRequest) -> TaskAbi
         updated_at=now,
     )
     items.insert(0, draft.model_dump(mode="json"))
-    _write_items(items)
+    _write_items_to_path(path, items)
     return draft
 
 
@@ -132,7 +149,7 @@ def update_task_ability_draft(draft_id: str, updates: dict[str, Any], *, store_p
     items = _load_items_from_path(path)
     draft = _find_draft(items, draft_id)
     changed_prompt_fields = False
-    for key in ("task_name", "task_id", "specific_rules", "sample_data", "related_content", "system_ai_draft", "system_ai_trace_id", "provider_status"):
+    for key in ("task_name", "task_id", "specific_rules", "sample_data", "related_content", "system_ai_draft", "system_ai_trace_id", "provider_status", "task_type", "ability_source"):
         if key not in updates:
             continue
         value = updates[key]
@@ -143,8 +160,17 @@ def update_task_ability_draft(draft_id: str, updates: dict[str, Any], *, store_p
             continue
         if str(draft.get(key) or "") != text:
             draft[key] = text
-            if key in {"specific_rules", "sample_data", "related_content", "system_ai_draft"}:
+            if key in {"specific_rules", "sample_data", "related_content", "system_ai_draft", "task_type", "ability_source"}:
                 changed_prompt_fields = True
+    for key in ("source_config", "field_mapping", "validation_rules"):
+        if key not in updates:
+            continue
+        value = updates[key]
+        if not isinstance(value, dict):
+            continue
+        if draft.get(key) != value:
+            draft[key] = value
+            changed_prompt_fields = True
     if changed_prompt_fields:
         draft["status"] = "草稿已确认"
         draft["flow_stage"] = "real_no_submit_ready"
@@ -179,6 +205,11 @@ def create_prompt_snapshot(task_id: str, *, note: str = "", store_path: Optional
         "specific_rules": str(draft.get("specific_rules") or ""),
         "sample_data": str(draft.get("sample_data") or ""),
         "related_content": str(draft.get("related_content") or ""),
+        "source_config": draft.get("source_config") if isinstance(draft.get("source_config"), dict) else {},
+        "field_mapping": draft.get("field_mapping") if isinstance(draft.get("field_mapping"), dict) else {},
+        "validation_rules": draft.get("validation_rules") if isinstance(draft.get("validation_rules"), dict) else {},
+        "task_type": str(draft.get("task_type") or ""),
+        "ability_source": str(draft.get("ability_source") or ""),
         "note": str(note or ""),
         "created_at": _now().isoformat(),
     }
@@ -227,6 +258,11 @@ def restore_prompt_snapshot(task_id: str, snapshot_id: str, *, store_path: Optio
             "specific_rules": str(snapshot.get("specific_rules") or ""),
             "sample_data": str(snapshot.get("sample_data") or ""),
             "related_content": str(snapshot.get("related_content") or ""),
+            "source_config": snapshot.get("source_config") if isinstance(snapshot.get("source_config"), dict) else {},
+            "field_mapping": snapshot.get("field_mapping") if isinstance(snapshot.get("field_mapping"), dict) else {},
+            "validation_rules": snapshot.get("validation_rules") if isinstance(snapshot.get("validation_rules"), dict) else {},
+            "task_type": str(snapshot.get("task_type") or ""),
+            "ability_source": str(snapshot.get("ability_source") or ""),
         },
         store_path=path,
     )
@@ -236,6 +272,13 @@ def approve_task_ability_version(task_id: str, *, store_path: Optional[Path] = N
     path = store_path or _store_path()
     items = _load_items_from_path(path)
     draft = _find_latest_draft_by_task_id(items, task_id)
+    gate = get_task_ability_run_gate(task_id, store_path=path)
+    if not gate.get("can_approve") and not (
+        bool(draft.get("capability_enabled"))
+        and str(draft.get("flow_stage") or "") == "capability_enabled"
+        and gate.get("can_start_trial")
+    ):
+        raise TaskAbilityFlowError(str(gate.get("next_step") or "Step3 审核未通过，不能启用做题能力。"))
     if bool(draft.get("capability_enabled")) and str(draft.get("flow_stage") or "") == "capability_enabled":
         return {
             "ok": True,
@@ -254,7 +297,7 @@ def run_task_ability_live_http_test(
     store_path: Optional[Path] = None,
     review_root: Optional[Path] = None,
     account_user_id: str = "",
-    use_system_ai_for_vision: bool = True,
+    use_system_ai_for_vision: bool = False,
     db: Optional[Session] = None,
 ) -> dict[str, Any]:
     path = store_path or _store_path()
@@ -265,7 +308,7 @@ def run_task_ability_live_http_test(
         store_path=path,
         review_root=review_root,
         db=db,
-        allow_temp_save=True,
+        allow_temp_save=not _is_3d_rubric_draft(draft),
         target_account_user_id=account_user_id,
         use_system_ai_for_vision=use_system_ai_for_vision,
     )
@@ -287,7 +330,7 @@ def get_task_ability_live_http_test_report(
     review_root: Optional[Path] = None,
 ) -> dict[str, Any]:
     path = store_path or _store_path()
-    root = review_root or _default_review_root(path, {"task_id": task_id})
+    root = review_root or _default_live_http_review_root(path, task_id)
     report_path = root / f"{report_id}.json"
     if not report_path.exists():
         raise FileNotFoundError(f"live http test report not found: {report_id}")
@@ -304,7 +347,7 @@ def get_latest_task_ability_live_http_test_report(
     review_root: Optional[Path] = None,
 ) -> dict[str, Any]:
     path = store_path or _store_path()
-    root = review_root or _default_review_root(path, {"task_id": task_id})
+    root = review_root or _default_live_http_review_root(path, task_id)
     latest_path = _latest_json_artifact(root)
     if latest_path is None:
         raise FileNotFoundError(f"live http test report not found for task: {task_id}")
@@ -312,6 +355,211 @@ def get_latest_task_ability_live_http_test_report(
     artifact["report_id"] = latest_path.stem
     artifact["task_id"] = str(task_id)
     return artifact
+
+
+def _step3_compact_text(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, (int, float, bool)):
+        return str(value).strip()
+    return ""
+
+
+def _step3_first_text(record: dict[str, Any], keys: list[str]) -> str:
+    for key in keys:
+        text = _step3_compact_text(record.get(key))
+        if text:
+            return text
+    return ""
+
+
+def _step3_pick_reason(record: dict[str, Any]) -> str:
+    return _step3_first_text(record, ["reason", "rationale", "explanation", "analysis", "why", "依据", "原因", "说明"])
+
+
+def _step3_pick_verdict(record: dict[str, Any]) -> str:
+    direct = _step3_first_text(record, ["verdict", "status", "result", "judgement", "judgment", "decision", "answer", "score", "value"])
+    if direct:
+        return direct
+    if isinstance(record.get("satisfied"), bool):
+        return "满足" if record.get("satisfied") else "不满足"
+    if isinstance(record.get("pass"), bool):
+        return "通过" if record.get("pass") else "不通过"
+    return "-"
+
+
+def _step3_pick_source(record: dict[str, Any], fallback: str) -> str:
+    return _step3_first_text(record, ["rubric_id", "id", "key", "name", "title", "dimension", "field", "label", "question_id"]) or fallback
+
+
+def _collect_step3_reason_entries_from_value(value: Any, path: str = "qwen", entries: Optional[list[dict[str, str]]] = None) -> list[dict[str, str]]:
+    result = entries if entries is not None else []
+    if len(result) >= 80:
+        return result
+    if isinstance(value, list):
+        for index, item in enumerate(value, start=1):
+            _collect_step3_reason_entries_from_value(item, f"{path} {index}", result)
+        return result
+    if not isinstance(value, dict):
+        return result
+
+    reason = _step3_pick_reason(value)
+    if reason:
+        result.append(
+            {
+                "source": _step3_pick_source(value, path),
+                "verdict": _step3_pick_verdict(value),
+                "reason": reason,
+            }
+        )
+
+    for key, child in value.items():
+        if re.search(r"(reason|rationale|explanation|analysis|why|依据|原因|说明)$", str(key), re.IGNORECASE):
+            reason_text = _step3_compact_text(child)
+            if reason_text and reason_text == reason:
+                continue
+            if reason_text:
+                result.append(
+                    {
+                        "source": f"{path}.{key}",
+                        "verdict": _step3_pick_verdict(value),
+                        "reason": reason_text,
+                    }
+                )
+            continue
+        if isinstance(child, (dict, list)):
+            _collect_step3_reason_entries_from_value(child, f"{path}.{key}", result)
+    return result
+
+
+def _collect_step3_reason_entries(report: dict[str, Any]) -> list[dict[str, str]]:
+    ai_decision = report.get("ai_decision") if isinstance(report.get("ai_decision"), dict) else {}
+    seen: set[str] = set()
+    entries: list[dict[str, str]] = []
+    rubric_entries: list[dict[str, str]] = []
+    for key in STEP3_RUBRIC_ARRAY_KEYS:
+        value = ai_decision.get(key)
+        if not isinstance(value, list):
+            continue
+        for index, item in enumerate(value, start=1):
+            if not isinstance(item, dict):
+                continue
+            rubric_entries.append(
+                {
+                    "source": _step3_pick_source(item, f"第 {index} 项"),
+                    "verdict": _step3_pick_verdict(item),
+                    "reason": _step3_pick_reason(item),
+                }
+            )
+    additional_decision = dict(ai_decision)
+    for key in STEP3_RUBRIC_ARRAY_KEYS:
+        additional_decision.pop(key, None)
+    for entry in [*rubric_entries, *_collect_step3_reason_entries_from_value(additional_decision, "qwen")]:
+        reason = str(entry.get("reason") or "").strip()
+        key = f"{entry.get('source') or ''}::{entry.get('verdict') or ''}::{reason}"
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append({**entry, "reason": reason})
+    return entries
+
+
+def _is_step3_error_review_status(review_status: str) -> bool:
+    return bool(re.search(r"fail|error|reject|blocked|异常|失败|驳回", str(review_status or ""), re.IGNORECASE))
+
+
+def _has_step3_human_unlikely_precision(report: dict[str, Any], entries: list[dict[str, str]]) -> bool:
+    for entry in entries:
+        if STEP3_HUMAN_UNLIKELY_PRECISION_PATTERN.search(str(entry.get("reason") or "")):
+            return True
+    ai_decision = report.get("ai_decision") if isinstance(report.get("ai_decision"), dict) else {}
+    try:
+        decision_text = json.dumps(ai_decision, ensure_ascii=False)
+    except TypeError:
+        decision_text = str(ai_decision)
+    return bool(STEP3_HUMAN_UNLIKELY_PRECISION_PATTERN.search(decision_text))
+
+
+def _evaluate_step3_live_report(report: dict[str, Any]) -> dict[str, Any]:
+    entries = _collect_step3_reason_entries(report)
+    review_status = str(report.get("review_status") or "")
+    if not bool(report.get("ok")):
+        return {
+            "step3_review_status": "blocked",
+            "step3_review_message": "Step3 live 测试未成功，不能进入 Step4。",
+            "can_enter_step4": False,
+            "step3_reason_count": len(entries),
+        }
+    if bool(report.get("submits_remote")):
+        return {
+            "step3_review_status": "blocked",
+            "step3_review_message": "Step3 检测到正式提交动作，必须阻断。",
+            "can_enter_step4": False,
+            "step3_reason_count": len(entries),
+        }
+    if _is_step3_error_review_status(review_status):
+        return {
+            "step3_review_status": "blocked",
+            "step3_review_message": "Step3 平台校验状态异常，需修正后重跑。",
+            "can_enter_step4": False,
+            "step3_reason_count": len(entries),
+        }
+    if not entries:
+        return {
+            "step3_review_status": "blocked",
+            "step3_review_message": "Step3 没有可追溯的 qwen 原因，不能把平台提示或答案预览当作依据。",
+            "can_enter_step4": False,
+            "step3_reason_count": 0,
+        }
+    if any(not str(entry.get("reason") or "").strip() for entry in entries):
+        return {
+            "step3_review_status": "blocked",
+            "step3_review_message": "Step3 qwen 输出存在缺少原因的题目项，不能进入 Step4。",
+            "can_enter_step4": False,
+            "step3_reason_count": len(entries),
+        }
+    if _has_step3_human_unlikely_precision(report, entries):
+        return {
+            "step3_review_status": "needs_review",
+            "step3_review_message": "Step3 qwen 原因包含色号、像素、坐标等非人类精确表达，需人工复核。",
+            "can_enter_step4": False,
+            "step3_reason_count": len(entries),
+        }
+    if not bool(report.get("saved_to_task_ui")):
+        return {
+            "step3_review_status": "needs_review",
+            "step3_review_message": "Step3 尚未确认写入任务页暂存，只能人工复核，不能直接进入 Step4。",
+            "can_enter_step4": False,
+            "step3_reason_count": len(entries),
+        }
+    return {
+        "step3_review_status": "allow",
+        "step3_review_message": "Step3 qwen 原因完整且已暂存，允许进入 Step4。",
+        "can_enter_step4": True,
+        "step3_reason_count": len(entries),
+    }
+
+
+def _build_step3_gate(live_test_report: dict[str, Any], review: dict[str, Any], *, draft: Optional[dict[str, Any]] = None, capability_enabled: bool) -> dict[str, Any]:
+    if live_test_report:
+        if draft is not None:
+            stale_reason = _live_report_stale_reason(live_test_report, draft)
+            if stale_reason:
+                return {
+                    "step3_review_status": "blocked",
+                    "step3_review_message": stale_reason,
+                    "can_enter_step4": False,
+                    "step3_reason_count": 0,
+                }
+        return _evaluate_step3_live_report(live_test_report)
+    return {
+        "step3_review_status": "blocked",
+        "step3_review_message": "还没有 Step3 live 审核件，先完成真实题不提交审核。",
+        "can_enter_step4": False,
+        "step3_reason_count": 0,
+    }
 
 
 def get_task_ability_run_gate(task_id: str, *, store_path: Optional[Path] = None) -> dict[str, Any]:
@@ -330,6 +578,8 @@ def get_task_ability_run_gate(task_id: str, *, store_path: Optional[Path] = None
             "capability_enabled": False,
             "review_status": "",
             "approved_at": "",
+            "step3_review_status": "blocked",
+            "step3_review_message": "当前任务还没有能力草稿，先完成 Step2 能力调教。",
             "live_test_report": {},
             "last_trial_run": {},
             "last_production_run": {},
@@ -348,15 +598,20 @@ def get_task_ability_run_gate(task_id: str, *, store_path: Optional[Path] = None
     state = _load_task_ability_run_state(path, task_id)
     run_config = get_task_ability_run_config(task_id, store_path=path)
     capability_enabled = bool(draft.get("capability_enabled")) and str(draft.get("flow_stage") or "") == "capability_enabled"
-    can_approve = bool(review.get("saved_to_task_ui")) and not capability_enabled
-    can_start_trial = capability_enabled
-    can_start_production = capability_enabled and bool((state.get("last_trial_run") or {}).get("run_id"))
-    if can_approve:
+    step3_gate = _build_step3_gate(live_test_report, review, draft=draft, capability_enabled=capability_enabled)
+    step3_can_enter = bool(step3_gate.get("can_enter_step4"))
+    can_approve = step3_can_enter and not capability_enabled
+    can_start_trial = capability_enabled and step3_can_enter
+    last_trial_run = state.get("last_trial_run") if isinstance(state.get("last_trial_run"), dict) else {}
+    can_start_production = can_start_trial and _trial_run_allows_production(last_trial_run, draft=draft)
+    if not step3_can_enter:
+        next_step = str(step3_gate.get("step3_review_message") or "Step3 审核未通过，不能进入 Step4。")
+    elif can_approve:
         next_step = "Live 暂存验证已经写入真实做题界面，可以人工批准当前能力版本。"
     elif not capability_enabled:
         next_step = "先完成 Live 暂存验证并人工批准能力版本。"
     elif not can_start_production:
-        next_step = "请先启动一次试运行，再由人工拍板是否进入生产运行。"
+        next_step = "请先完成一次成功试运行并确认无异常，再由人工拍板是否进入生产运行。"
     else:
         next_step = "试运行记录已存在，可以人工决定是否启动生产运行。"
     return {
@@ -369,8 +624,11 @@ def get_task_ability_run_gate(task_id: str, *, store_path: Optional[Path] = None
         "capability_enabled": capability_enabled,
         "review_status": str(review.get("review_status") or ""),
         "approved_at": str(review.get("approved_at") or ""),
+        "step3_review_status": str(step3_gate.get("step3_review_status") or ""),
+        "step3_review_message": str(step3_gate.get("step3_review_message") or ""),
+        "step3_reason_count": int(step3_gate.get("step3_reason_count") or 0),
         "live_test_report": live_test_report,
-        "last_trial_run": state.get("last_trial_run") if isinstance(state.get("last_trial_run"), dict) else {},
+        "last_trial_run": last_trial_run,
         "last_production_run": state.get("last_production_run") if isinstance(state.get("last_production_run"), dict) else {},
         "can_approve": can_approve,
         "can_start_trial": can_start_trial,
@@ -534,7 +792,7 @@ def build_task_ability_payload_debug(
     try:
         decision, provider_used = _replay_decision_for_sample(context, draft, use_system_ai_for_vision=use_system_ai_for_vision)
         generated_answer_preview = _build_answer_preview(decision)
-        payload = _build_temp_draft_payload(path, draft, context, decision)
+        payload = _build_temp_draft_payload_debug_preview(path, draft, context, decision)
         error_message = ""
     except Exception as exc:  # noqa: BLE001 - payload debug should surface sample-level failure instead of 400.
         decision = {}
@@ -563,9 +821,11 @@ def record_task_ability_run(task_id: str, mode: str, run: Any, *, store_path: Op
     mode_text = str(mode or "").strip().lower()
     if mode_text not in {"trial", "production"}:
         raise TaskAbilityFlowError(f"不支持的运行模式：{mode}")
+    items = _load_items_from_path(path)
+    draft = _find_latest_draft_by_task_id(items, task_id)
     state = _load_task_ability_run_state(path, task_id)
-    if mode_text == "production" and not bool((state.get("last_trial_run") or {}).get("run_id")):
-        raise TaskAbilityFlowError("请先完成试运行并人工确认，再启动生产运行。")
+    if mode_text == "production" and not _trial_run_allows_production(state.get("last_trial_run") if isinstance(state.get("last_trial_run"), dict) else {}, draft=draft):
+        raise TaskAbilityFlowError("请先完成一次成功试运行并人工确认，再启动生产运行。")
     payload = _to_plain_dict(run)
     summary = {
         "mode": mode_text,
@@ -576,7 +836,10 @@ def record_task_ability_run(task_id: str, mode: str, run: Any, *, store_path: Op
         "abnormal_account_count": _num(payload.get("abnormal_account_count")),
         "health_ok": bool(payload.get("health_ok")),
         "generated_at": str(payload.get("generated_at") or _now().isoformat()),
+        **_run_context_for_draft(draft),
     }
+    if mode_text == "trial":
+        summary["passed_for_production"] = _trial_run_allows_production(summary, draft=draft)
     state[f"last_{mode_text}_run"] = summary
     state["updated_at"] = _now().isoformat()
     _write_task_ability_run_state(path, task_id, state)
@@ -642,6 +905,18 @@ def run_task_ability_real_no_submit(
     path = store_path or _store_path()
     items = _load_items_from_path(path)
     draft = _find_draft(items, draft_id)
+    if _is_3d_rubric_draft(draft):
+        return _run_3d_rubric_real_no_submit(
+            draft_id,
+            store_path=path,
+            review_root=review_root,
+            queue_snapshot=queue_snapshot,
+            question_context=question_context,
+            ai_decision=ai_decision,
+            allow_temp_save=allow_temp_save,
+            target_account_user_id=target_account_user_id,
+            use_system_ai_for_vision=use_system_ai_for_vision,
+        )
     if str(draft.get("task_id") or "") == BON8_TASK_ID:
         return _run_bon8_task_ability_real_no_submit(
             draft_id,
@@ -743,6 +1018,7 @@ def run_task_ability_real_no_submit(
         "draft_id": str(draft_id),
         "task_name": str(draft.get("task_name") or ""),
         "task_id": str(draft.get("task_id") or ""),
+        "prompt": _ability_prompt_metadata(draft),
         "writes_remote": writes_remote,
         "submits_remote": False,
         "sends_network": sends_network,
@@ -804,6 +1080,93 @@ def _run_bon8_task_ability_real_no_submit(
     raise TaskAbilityFlowError("bon8 统一不提交入口尚未完全接入，请先通过任务操作台执行 bon8 端到端做题不提交。")
 
 
+def _run_3d_rubric_real_no_submit(
+    draft_id: str,
+    *,
+    store_path: Path,
+    review_root: Optional[Path] = None,
+    queue_snapshot: Optional[dict[str, Any]] = None,
+    question_context: Optional[dict[str, Any]] = None,
+    ai_decision: Optional[dict[str, Any]] = None,
+    allow_temp_save: bool = False,
+    target_account_user_id: str = "",
+    use_system_ai_for_vision: bool = False,
+) -> dict[str, Any]:
+    items = _load_items_from_path(store_path)
+    draft = _find_draft(items, draft_id)
+    if allow_temp_save:
+        field_mapping = draft.get("field_mapping") if isinstance(draft.get("field_mapping"), dict) else {}
+        if not field_mapping.get("verified_submit_temp_payload"):
+            raise TaskAbilityFlowError("3D 暂存字段映射尚未验证，已阻止写入远端；请先用录制包或网络证据确认 SubmitTempItemAnswer 字段。")
+        raise TaskAbilityFlowError("3D 暂存字段映射虽然已标记验证，但当前版本尚未实现远端暂存写入器。")
+    snapshot = _normalize_queue_snapshot(queue_snapshot or {})
+    if target_account_user_id:
+        snapshot = _with_target_account(snapshot, target_account_user_id)
+    context = dict(question_context or {})
+    if not context:
+        context = _build_live_question_context_from_category(draft, snapshot) or _build_question_context_from_local_evidence(store_path, draft)
+    if not context:
+        raise TaskAbilityFlowError("3D 真实题不提交缺少题面上下文，无法读取参考图、候选图和 Rubrics。")
+    _validate_3d_rubric_question_context(context)
+    decision = _normalize_3d_rubric_ai_decision(
+        ai_decision
+        or _build_task_ai_decision_for_3d_rubric(context, draft, require_provider=True, prefer_system_ai=use_system_ai_for_vision)
+    )
+    answer_preview = _build_3d_rubric_answer_preview(decision)
+
+    artifact = {
+        "ok": True,
+        "stage": "3D 端到端做题不提交：待人工审核",
+        "draft_id": str(draft_id),
+        "task_name": str(draft.get("task_name") or ""),
+        "task_id": str(draft.get("task_id") or ""),
+        "task_type": TASK_TYPE_3D_RUBRIC_EVAL,
+        "prompt": _ability_prompt_metadata(draft),
+        "writes_remote": False,
+        "submits_remote": False,
+        "sends_network": bool(context.get("sends_network")),
+        "queue_snapshot": snapshot,
+        "question_context": context,
+        "ai_decision": decision,
+        "answer_preview": answer_preview,
+        "saved_answer": answer_preview,
+        "saved_to_task_ui": False,
+        "temp_draft_result": {},
+        "temp_draft_payload": {},
+        "temp_draft_payload_preview": {},
+        "ui_review_hint": "已生成 3D 结构化判题审核件；暂存字段映射未验证前不会写入远端或提交。",
+        "review_status": "待人工审核",
+        "created_at": _now().isoformat(),
+        "message": "3D 判题结果已生成结构化预览，未暂存、未提交。",
+    }
+    artifact_path = _write_review_artifact(review_root or _default_3d_rubric_review_root(store_path, draft), artifact)
+    artifact["review_artifact_path"] = str(artifact_path)
+
+    draft["status"] = "待审核真实不提交结果"
+    draft["flow_stage"] = "real_no_submit_review"
+    draft["capability_enabled"] = False
+    draft["task_queue_snapshot"] = snapshot
+    draft["real_no_submit_review"] = {
+        "review_status": "待人工审核",
+        "stage": artifact["stage"],
+        "item_id": str(context.get("item_id") or ""),
+        "task_type": TASK_TYPE_3D_RUBRIC_EVAL,
+        "account_user_id": str(snapshot.get("account_user_id") or ""),
+        "account_name": str(snapshot.get("account_name") or ""),
+        "source_mode": str(context.get("source_mode") or ""),
+        "review_artifact_path": str(artifact_path),
+        "writes_remote": False,
+        "submits_remote": False,
+        "saved_to_task_ui": False,
+        "answer_preview": answer_preview,
+        "ui_review_hint": artifact["ui_review_hint"],
+    }
+    draft["next_step"] = artifact["ui_review_hint"]
+    draft["updated_at"] = _now().isoformat()
+    _write_items_to_path(store_path, items)
+    return artifact
+
+
 def approve_task_ability_real_no_submit(draft_id: str, *, store_path: Optional[Path] = None) -> dict[str, Any]:
     path = store_path or _store_path()
     items = _load_items_from_path(path)
@@ -812,7 +1175,19 @@ def approve_task_ability_real_no_submit(draft_id: str, *, store_path: Optional[P
     if not review:
         raise TaskAbilityFlowError("还没有真实题不提交审核件，不能启用做题能力。")
     if not review.get("saved_to_task_ui"):
+        if _is_3d_rubric_draft(draft):
+            raise TaskAbilityFlowError("3D 能力已生成结构化审核件，但尚未验证暂存字段并保存到真实做题界面，不能启用自动做题能力。")
         raise TaskAbilityFlowError("端到端不提交还没有把 AI 答案保存到真实做题界面，不能启用做题能力。")
+    task_id = str(draft.get("task_id") or "")
+    live_test_report: dict[str, Any] = {}
+    if task_id:
+        try:
+            live_test_report = get_latest_task_ability_live_http_test_report(task_id, store_path=path)
+        except FileNotFoundError:
+            live_test_report = {}
+    step3_gate = _build_step3_gate(live_test_report, review, draft=draft, capability_enabled=False)
+    if not step3_gate.get("can_enter_step4"):
+        raise TaskAbilityFlowError(str(step3_gate.get("step3_review_message") or "Step3 审核未通过，不能启用做题能力。"))
     draft["status"] = "有做题能力"
     draft["flow_stage"] = "capability_enabled"
     draft["capability_enabled"] = True
@@ -1004,13 +1379,73 @@ def _chat_learning_package_id(payload: dict[str, Any]) -> str:
 
 
 def _prompt_fingerprint(draft: dict[str, Any]) -> str:
-    parts = [
-        str(draft.get("system_ai_draft") or ""),
-        str(draft.get("specific_rules") or ""),
-        str(draft.get("sample_data") or ""),
-        str(draft.get("related_content") or ""),
-    ]
-    return hashlib.sha256("\n---\n".join(parts).encode("utf-8")).hexdigest()
+    payload = {
+        "system_ai_draft": str(draft.get("system_ai_draft") or ""),
+        "specific_rules": str(draft.get("specific_rules") or ""),
+        "sample_data": str(draft.get("sample_data") or ""),
+        "related_content": str(draft.get("related_content") or ""),
+        "source_config": draft.get("source_config") if isinstance(draft.get("source_config"), dict) else {},
+        "field_mapping": draft.get("field_mapping") if isinstance(draft.get("field_mapping"), dict) else {},
+        "validation_rules": draft.get("validation_rules") if isinstance(draft.get("validation_rules"), dict) else {},
+        "task_type": str(draft.get("task_type") or ""),
+        "ability_source": str(draft.get("ability_source") or ""),
+    }
+    return hashlib.sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def _ability_prompt_metadata(draft: dict[str, Any]) -> dict[str, str]:
+    return {
+        "draft_id": str(draft.get("id") or ""),
+        "ability_version": str(draft.get("version") or ""),
+        "fingerprint": _prompt_fingerprint(draft),
+    }
+
+
+def _live_report_stale_reason(report: dict[str, Any], draft: dict[str, Any]) -> str:
+    current_draft_id = str(draft.get("id") or "")
+    report_draft_id = str(report.get("draft_id") or "")
+    if current_draft_id and report_draft_id != current_draft_id:
+        return "Step3 live 审核件已过期：报告不属于当前能力草稿，请重新执行真实题不提交审核。"
+    prompt = report.get("prompt") if isinstance(report.get("prompt"), dict) else {}
+    report_fingerprint = str(prompt.get("fingerprint") or "")
+    current_fingerprint = _prompt_fingerprint(draft)
+    if not report_fingerprint or report_fingerprint != current_fingerprint:
+        return "Step3 live 审核件已过期：当前 Prompt 或规则已变化，请重新执行真实题不提交审核。"
+    return ""
+
+
+def _run_context_for_draft(draft: dict[str, Any]) -> dict[str, str]:
+    return {
+        "draft_id": str(draft.get("id") or ""),
+        "ability_version": str(draft.get("version") or ""),
+        "prompt_fingerprint": _prompt_fingerprint(draft),
+    }
+
+
+def build_task_ability_run_context(draft: dict[str, Any]) -> dict[str, str]:
+    return _run_context_for_draft(draft)
+
+
+def _trial_run_matches_current_draft(run: dict[str, Any], draft: Optional[dict[str, Any]]) -> bool:
+    if draft is None:
+        return False
+    context = _run_context_for_draft(draft)
+    return all(str(run.get(key) or "") == value for key, value in context.items())
+
+
+def _trial_run_allows_production(run: dict[str, Any], *, draft: Optional[dict[str, Any]] = None) -> bool:
+    if not isinstance(run, dict) or not str(run.get("run_id") or ""):
+        return False
+    if not _trial_run_matches_current_draft(run, draft):
+        return False
+    status = str(run.get("status") or "").strip().lower()
+    if status not in {"completed", "completed_success", "succeeded", "trial_passed"}:
+        return False
+    if bool(run.get("health_ok")) is not True:
+        return False
+    if _num(run.get("selected_account_count")) <= 0:
+        return False
+    return _num(run.get("abnormal_account_count")) == 0
 
 
 def _write_latest_replay_summary(task_id: str, report: dict[str, Any], *, store_path: Path) -> dict[str, Any]:
@@ -1500,6 +1935,85 @@ def _build_live_question_context(db: Optional[Session], draft: dict[str, Any], s
     }
 
 
+def _asset_url(value: Any) -> str:
+    if isinstance(value, str):
+        return value.strip()
+    if not isinstance(value, dict):
+        return ""
+    for key in ("tos_url", "url", "image_url", "preview_url", "download_url"):
+        text = str(value.get(key) or "").strip()
+        if text:
+            return text
+    return ""
+
+
+def _normalize_3d_live_rubrics(value: Any) -> list[dict[str, Any]]:
+    rubric_items = value.get("rubrics") if isinstance(value, dict) else value
+    if not isinstance(rubric_items, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for index, item in enumerate(rubric_items, start=1):
+        if not isinstance(item, dict):
+            continue
+        rubric_id = str(item.get("rubric_id") or item.get("id") or item.get("key") or index).strip()
+        result.append(
+            {
+                "rubric_id": rubric_id,
+                "dimension": str(item.get("dimension") or "").strip(),
+                "question": str(item.get("question") or item.get("text") or "").strip(),
+                "pass_criterion": str(item.get("pass_criterion") or "").strip(),
+                "fail_criterion": str(item.get("fail_criterion") or "").strip(),
+                "score_gate": str(item.get("score_gate") or "").strip(),
+                "tier": str(item.get("tier") or "").strip(),
+            }
+        )
+    return result
+
+
+def _extract_3d_live_context_fields(item: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(item, dict):
+        return {}
+    reference_image = (
+        _asset_url(item.get("ref_img"))
+        or _asset_url(item.get("reference_image"))
+        or _asset_url(item.get("image_gt"))
+        or str(item.get("image_gt") or "").strip()
+    )
+    candidate_images: list[dict[str, str]] = []
+    artifact_views = item.get("artifact_views") if isinstance(item.get("artifact_views"), dict) else {}
+    for label, asset in artifact_views.items():
+        url = _asset_url(asset)
+        if url:
+            candidate_images.append({"label": str(label), "url": url})
+    if not candidate_images:
+        latest = _asset_url(item.get("latest_screenshot"))
+        if latest:
+            candidate_images.append({"label": "latest_screenshot", "url": latest})
+    rubrics_block = item.get("rubrics")
+    rubrics = _normalize_3d_live_rubrics(rubrics_block)
+    extra_context: dict[str, Any] = {}
+    if isinstance(rubrics_block, dict):
+        for key in ("rubric_design_note", "target_summary", "rubrics_model", "status"):
+            if rubrics_block.get(key) not in (None, ""):
+                extra_context[key] = rubrics_block.get(key)
+    for key in ("case_key", "category", "set_name", "run_name", "relative_path"):
+        if item.get(key) not in (None, ""):
+            extra_context[key] = item.get(key)
+    task_text = "\n".join(str(extra_context.get(key) or "") for key in ("rubric_design_note", "target_summary") if extra_context.get(key))
+    result: dict[str, Any] = {
+        "reference_image": reference_image,
+        "image_gt": reference_image,
+        "candidate_images": candidate_images,
+        "rubrics": rubrics,
+        "extra_context": extra_context,
+    }
+    if candidate_images:
+        result["model_image"] = candidate_images[0]["url"]
+    if task_text:
+        result["task_text"] = task_text
+    return result
+
+
 def _build_live_question_context_from_category(draft: dict[str, Any], snapshot: dict[str, Any]) -> Optional[dict[str, Any]]:
     account = _find_state_account(str(snapshot.get("account_user_id") or ""))
     cookie = str(account.get("cookie") or "") if account else ""
@@ -1509,55 +2023,67 @@ def _build_live_question_context_from_category(draft: dict[str, Any], snapshot: 
     if not task_id:
         return None
     node_id = _num(draft.get("node_id"), snapshot.get("node_id"), 1) or 1
-    payload = {
-        "TaskID": task_id,
-        "NodeID": node_id,
-        "ItemCategoryType": 0,
-        "Filter": {},
-        "PageRequest": {"PageNo": 0, "PageSize": 1},
-    }
+    category_types = [0, 1, 3] if _is_3d_rubric_draft(draft) else [0]
     referer = str(account.get("referer") or account.get("operationUrl") or "https://aidp.juejin.cn/operation/task-v2?org=AIDP%20Coding&page=1")
-    try:
-        response = requests.post(
-            f"https://aidp.juejin.cn{SEARCH_ITEM_CATEGORY_ENDPOINT}",
-            json=payload,
-            headers={
-                "Accept": "application/json, text/plain, */*",
-                "Cookie": cookie,
-                "Referer": referer,
-                "Origin": "https://aidp.juejin.cn",
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
-                "Agw-Js-Conv": "str",
-                "X-JS-REQ": "1",
-                "X-Backend-Side": "4",
-                "X-Backend-Org-Id": "100",
-            },
-            timeout=20,
-        )
-        data = response.json()
-    except (requests.RequestException, ValueError):
-        return None
-    current_item = _first_category_item(data)
-    if not current_item:
-        return None
-    content = _parse_category_item_content(current_item)
-    item = content.get("item") if isinstance(content.get("item"), dict) else content
-    item_id = str(current_item.get("ItemID") or current_item.get("itemID") or content.get("itemID") or "")
-    if not item_id:
-        return None
-    return {
-        "source_mode": "live_search_item_category",
-        "sends_network": True,
-        "evidence_path": f"{SEARCH_ITEM_CATEGORY_ENDPOINT} status={response.status_code} item={item_id}",
-        "item_id": item_id,
-        "node_id": str(node_id),
-        "uid": str(item.get("uid") or current_item.get("UID") or current_item.get("uid") or ""),
-        "image_gt": str(item.get("image_gt") or current_item.get("image_gt") or ""),
-        "model_image": str(item.get("model_image") or current_item.get("model_image") or ""),
-        "current_answer_data": content.get("data") if isinstance(content.get("data"), dict) else {},
-        "raw_status": current_item.get("Status") or current_item.get("status"),
-        **_model_images_from_item(item),
-    }
+    for category_type in category_types:
+        payload = {
+            "TaskID": task_id,
+            "NodeID": node_id,
+            "ItemCategoryType": category_type,
+            "Filter": {},
+            "PageRequest": {"PageNo": 0, "PageSize": 1},
+        }
+        try:
+            response = requests.post(
+                f"https://aidp.juejin.cn{SEARCH_ITEM_CATEGORY_ENDPOINT}",
+                json=payload,
+                headers={
+                    "Accept": "application/json, text/plain, */*",
+                    "Cookie": cookie,
+                    "Referer": referer,
+                    "Origin": "https://aidp.juejin.cn",
+                    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0",
+                    "Agw-Js-Conv": "str",
+                    "X-JS-REQ": "1",
+                    "X-Backend-Side": "4",
+                    "X-Backend-Org-Id": "100",
+                },
+                timeout=20,
+            )
+            data = response.json()
+        except (requests.RequestException, ValueError):
+            continue
+        current_item = _first_category_item(data)
+        if not current_item:
+            continue
+        content = _parse_category_item_content(current_item)
+        item = content.get("item") if isinstance(content.get("item"), dict) else content
+        item_id = str(current_item.get("ItemID") or current_item.get("itemID") or content.get("itemID") or "")
+        if not item_id:
+            continue
+        context = {
+            "task_id": task_id,
+            "source_mode": "live_search_item_category",
+            "sends_network": True,
+            "evidence_path": f"{SEARCH_ITEM_CATEGORY_ENDPOINT} status={response.status_code} item={item_id}",
+            "item_id": item_id,
+            "node_id": str(node_id),
+            "uid": str(item.get("uid") or current_item.get("UID") or current_item.get("uid") or ""),
+            "image_gt": str(item.get("image_gt") or current_item.get("image_gt") or ""),
+            "model_image": str(item.get("model_image") or current_item.get("model_image") or ""),
+            "current_answer_data": content.get("data") if isinstance(content.get("data"), dict) else {},
+            "raw_status": current_item.get("Status") or current_item.get("status"),
+            "item_category_type": category_type,
+            **_model_images_from_item(item),
+        }
+        if _is_3d_rubric_draft(draft):
+            context.update(_extract_3d_live_context_fields(item))
+            try:
+                _validate_3d_rubric_question_context(context)
+            except TaskAbilityFlowError:
+                continue
+        return context
+    return None
 
 
 def _claim_pending_item_and_read_context(draft: dict[str, Any], snapshot: dict[str, Any]) -> Optional[dict[str, Any]]:
@@ -1681,6 +2207,7 @@ def _build_live_question_context_from_evidence(store_path: Path, draft: dict[str
     content = answer.get("content") if isinstance(answer.get("content"), dict) else {}
     item = content.get("item") if isinstance(content.get("item"), dict) else {}
     return {
+        "task_id": str(evidence.get("task_id") or draft.get("task_id") or ""),
         "source_mode": "live_mget_answer_list_from_evidence",
         "sends_network": True,
         "evidence_path": f"{MGET_ANSWER_LIST_ENDPOINT} status={response.status_code} item={answer.get('ItemID') or evidence.get('item_id')}",
@@ -1697,6 +2224,7 @@ def _build_question_context_from_local_evidence(store_path: Path, draft: dict[st
     evidence = _load_local_evidence(store_path, draft)
     if evidence:
         return {
+            "task_id": str(evidence.get("task_id") or draft.get("task_id") or ""),
             "source_mode": "local-evidence-real-task-sample",
             "sends_network": False,
             "evidence_path": str(evidence.get("evidence_path") or ""),
@@ -1707,6 +2235,7 @@ def _build_question_context_from_local_evidence(store_path: Path, draft: dict[st
             "current_answer_data": evidence.get("current_answer_data") if isinstance(evidence.get("current_answer_data"), dict) else {},
         }
     return {
+        "task_id": str(draft.get("task_id") or ""),
         "source_mode": "draft-only",
         "sends_network": False,
         "item_id": "",
@@ -2568,14 +3097,7 @@ def _prepare_research_chart_image_for_ai(url: str) -> str:
         return ""
     if source.startswith("data:"):
         return source
-    try:
-        response = requests.get(source, timeout=30)
-        response.raise_for_status()
-        content_type = str(response.headers.get("Content-Type") or "").strip() or "image/png"
-        encoded = base64.b64encode(response.content).decode("ascii")
-        return f"data:{content_type};base64,{encoded}"
-    except Exception:
-        return source
+    return source
 
 
 def _parse_json_object(text: str) -> dict[str, Any]:
@@ -2655,6 +3177,8 @@ def _normalize_ai_decision(decision: dict[str, Any]) -> dict[str, Any]:
 
 
 def _build_answer_preview(decision: dict[str, Any]) -> dict[str, Any]:
+    if str(decision.get("task_type") or "") == TASK_TYPE_3D_RUBRIC_EVAL:
+        return _build_3d_rubric_answer_preview(decision)
     model_scores = decision.get("model_scores") if isinstance(decision.get("model_scores"), dict) else {}
     if model_scores:
         result: dict[str, Any] = {"data.discard": "No"}
@@ -2669,6 +3193,310 @@ def _build_answer_preview(decision: dict[str, Any]) -> dict[str, Any]:
         "data.label_remark.model_image": decision["reason"],
         "data.discard": "No",
     }
+
+
+def _is_3d_rubric_draft(draft: dict[str, Any]) -> bool:
+    return str(draft.get("task_type") or "").strip() == TASK_TYPE_3D_RUBRIC_EVAL
+
+
+def _parse_3d_boolean(value: Any, *, default: bool, field_name: str) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    if isinstance(value, str):
+        text = value.strip()
+        if not text:
+            return default
+        lowered = text.lower()
+        if lowered in {"true", "1", "yes", "y", "pass", "passed", "satisfied", "合理", "是", "满足"}:
+            return True
+        if lowered in {"false", "0", "no", "n", "fail", "failed", "unsatisfied", "不合理", "否", "不满足"}:
+            return False
+    raise TaskAbilityFlowError(f"{field_name}必须是明确 true/false。")
+
+
+def _parse_3d_rubrics_reasonable(value: Any) -> bool:
+    return _parse_3d_boolean(value, default=True, field_name="Rubrics 合理性")
+
+
+def _normalize_3d_rubric_ai_decision(decision: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(decision, dict):
+        raise TaskAbilityFlowError("3D AI 判题结果必须是 JSON 对象。")
+    rubrics = decision.get("rubric_items")
+    if not isinstance(rubrics, list) or not rubrics:
+        raise TaskAbilityFlowError("3D AI 判题结果缺少 rubric_items。")
+    normalized_rubrics: list[dict[str, Any]] = []
+    for index, item in enumerate(rubrics, start=1):
+        if not isinstance(item, dict):
+            raise TaskAbilityFlowError(f"Rubric {index} 判题结果必须是对象。")
+        rubric_id = str(item.get("rubric_id") or index).strip()
+        verdict = str(item.get("verdict") or item.get("status") or "").strip().lower()
+        if verdict in {"不满足", "unsatisfied", "fail", "failed", "false", "no"}:
+            verdict = "unsatisfied"
+        elif verdict in {"满足", "satisfied", "pass", "passed", "true", "yes"}:
+            verdict = "satisfied"
+        else:
+            raise TaskAbilityFlowError(f"Rubric {rubric_id} 缺少明确满足/不满足结论。")
+        reason = str(item.get("reason") or "").strip()
+        if verdict == "unsatisfied" and not reason:
+            raise TaskAbilityFlowError(f"Rubric {rubric_id} 选择不满足时必须填写不满足原因。")
+        normalized_rubrics.append(
+            {
+                "rubric_id": rubric_id,
+                "title": str(item.get("title") or item.get("text") or "").strip(),
+                "verdict": verdict,
+                "reason": reason,
+            }
+        )
+
+    dimensions = decision.get("dimension_scores")
+    if not isinstance(dimensions, dict):
+        raise TaskAbilityFlowError("3D AI 判题结果缺少 dimension_scores。")
+    normalized_dimensions: dict[str, dict[str, Any]] = {}
+    for key in ("S1", "S2", "A"):
+        item = dimensions.get(key)
+        if not isinstance(item, dict):
+            raise TaskAbilityFlowError(f"3D AI 判题结果缺少 {key} 维度评分。")
+        try:
+            score = int(item.get("score"))
+        except (TypeError, ValueError) as exc:
+            raise TaskAbilityFlowError(f"{key} 维度评分必须是 1-5 的整数。") from exc
+        if score < 1 or score > 5:
+            raise TaskAbilityFlowError(f"{key} 维度评分必须是 1-5 的整数。")
+        reason = str(item.get("reason") or "").strip()
+        if not reason:
+            raise TaskAbilityFlowError(f"{key} 维度必须填写评分原因。")
+        normalized_dimensions[key] = {"score": score, "reason": reason}
+
+    discard = decision.get("discard") if isinstance(decision.get("discard"), dict) else {}
+    rubrics_reasonable = _parse_3d_rubrics_reasonable(decision.get("rubrics_reasonable", True))
+    rubrics_reasonable_reason = str(decision.get("rubrics_reasonable_reason") or "").strip()
+    if rubrics_reasonable:
+        rubrics_reasonable_reason = "合理"
+    elif not rubrics_reasonable_reason:
+        raise TaskAbilityFlowError("Rubrics 判为不合理时必须填写原因。")
+    result = {
+        "task_type": TASK_TYPE_3D_RUBRIC_EVAL,
+        "rubrics_reasonable": rubrics_reasonable,
+        "rubrics_reasonable_reason": rubrics_reasonable_reason,
+        "rubric_items": normalized_rubrics,
+        "dimension_scores": normalized_dimensions,
+        "discard": {
+            "selected": _parse_3d_boolean(discard.get("selected"), default=False, field_name="3D 废弃选择"),
+            "reason": str(discard.get("reason") or "").strip(),
+        },
+        "evidence_summary": str(decision.get("evidence_summary") or "").strip(),
+        "confidence": str(decision.get("confidence") or "medium").strip() or "medium",
+        "provider_status": str(decision.get("provider_status") or "").strip(),
+    }
+    for key in ("provider_role", "provider_elapsed_ms", "fallback_reason"):
+        if key in decision:
+            result[key] = decision[key]
+    return result
+
+
+def _build_3d_rubric_answer_preview(decision: dict[str, Any]) -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "rubrics_reasonable": "合理" if decision.get("rubrics_reasonable") else "不合理",
+        "rubrics_reasonable_reason": str(decision.get("rubrics_reasonable_reason") or ""),
+        "data.discard": "Yes" if (decision.get("discard") or {}).get("selected") else "No",
+    }
+    for item in decision.get("rubric_items", []):
+        if not isinstance(item, dict):
+            continue
+        rubric_id = str(item.get("rubric_id") or "")
+        if not rubric_id:
+            continue
+        result[f"rubric_items.{rubric_id}.verdict"] = str(item.get("verdict") or "")
+        result[f"rubric_items.{rubric_id}.reason"] = str(item.get("reason") or "")
+    dimensions = decision.get("dimension_scores") if isinstance(decision.get("dimension_scores"), dict) else {}
+    for key, item in dimensions.items():
+        if not isinstance(item, dict):
+            continue
+        result[f"dimension_scores.{key}.score"] = item.get("score")
+        result[f"dimension_scores.{key}.reason"] = str(item.get("reason") or "")
+    return result
+
+
+def _parse_3d_rubric_ai_decision(content: str) -> dict[str, Any]:
+    parsed = _parse_json_object(str(content or ""))
+    if "manual_rules" in parsed or "current_item_input" in parsed or "output_schema" in parsed:
+        raise TaskAbilityFlowError("3D 做题 AI 复述了输入上下文，未返回判题 JSON。")
+    return _normalize_3d_rubric_ai_decision(parsed)
+
+
+def _build_task_ai_decision_for_3d_rubric(
+    context: dict[str, Any],
+    draft: dict[str, Any],
+    *,
+    require_provider: bool,
+    prefer_system_ai: bool = False,
+) -> dict[str, Any]:
+    if not require_provider:
+        raise TaskAbilityFlowError("3D 做题能力需要真实视觉 AI 判题结果，不能使用本地保守预览替代。")
+    runtime = get_system_ai_runtime_prompt() if prefer_system_ai else get_task_ai_runtime_prompt()
+    provider_role = "system_ai_3d_vision" if prefer_system_ai else "task_ai_3d"
+    if not runtime.get("provider_configured"):
+        raise TaskAbilityFlowError(f"{provider_role} provider 未配置，不能执行 3D 视觉判题。")
+    try:
+        return _call_3d_rubric_ai_provider(context, draft, runtime, provider_role=provider_role)
+    except TaskAbilityFlowError as exc:
+        if prefer_system_ai or not _is_image_unsupported_provider_error(str(exc)):
+            raise
+        system_runtime = get_system_ai_runtime_prompt()
+        if not system_runtime.get("provider_configured"):
+            raise TaskAbilityFlowError(f"做题 AI 不支持图片输入，且系统 AI 未配置，不能执行 3D 视觉判题：{exc}") from exc
+        decision = _call_3d_rubric_ai_provider(context, draft, system_runtime, provider_role="system_ai_3d_vision_fallback")
+        decision["fallback_reason"] = "task_ai_image_input_unsupported"
+        return decision
+
+
+def _call_3d_rubric_ai_provider(context: dict[str, Any], draft: dict[str, Any], runtime: dict[str, object], *, provider_role: str) -> dict[str, Any]:
+    endpoint = str(runtime.get("base_url") or "").rstrip("/")
+    if not endpoint.endswith("/chat/completions"):
+        endpoint += "/chat/completions"
+    headers = {"Authorization": f"Bearer {runtime.get('api_key')}", "Content-Type": "application/json"}
+    started = datetime.now(timezone.utc)
+    messages = _build_3d_rubric_ai_messages(context, draft, runtime)
+    payload = {
+        "model": runtime.get("model") or "gpt-4.1-mini",
+        "messages": messages,
+        "temperature": 0.0,
+        "max_tokens": 1800,
+        "response_format": {"type": "json_object"},
+    }
+    try:
+        response = requests.post(endpoint, headers=headers, json=payload, timeout=int(runtime.get("timeout_seconds") or 30))
+        if not getattr(response, "ok", True):
+            body = str(getattr(response, "text", ""))[:600]
+            raise TaskAbilityFlowError(f"{provider_role} 返回 HTTP {getattr(response, 'status_code', '')}: {body}")
+        response.raise_for_status()
+        data = response.json()
+        content = str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+        decision = _parse_3d_rubric_ai_decision(content)
+    except TaskAbilityFlowError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - visual gate must fail closed.
+        raise TaskAbilityFlowError(f"{provider_role} 3D 判题失败，不能进入真实题不提交：{exc}") from exc
+    decision["provider_status"] = "provider_ok"
+    decision["provider_role"] = provider_role
+    decision["provider_elapsed_ms"] = int((datetime.now(timezone.utc) - started).total_seconds() * 1000)
+    return decision
+
+
+def _build_3d_rubric_ai_messages(context: dict[str, Any], draft: dict[str, Any], runtime: dict[str, object]) -> list[dict[str, Any]]:
+    reference_image = str(context.get("reference_image") or context.get("image_gt") or "").strip()
+    candidate_images = _extract_3d_candidate_images(context)
+    rubrics = context.get("rubrics") if isinstance(context.get("rubrics"), list) else []
+    task_input = {
+        "manual_rules": {
+            "task_name": str(draft.get("task_name") or ""),
+            "task_id": str(draft.get("task_id") or context.get("task_id") or ""),
+            "ability_version": str(draft.get("version") or ""),
+            "rules": str(draft.get("system_ai_draft") or draft.get("specific_rules") or ""),
+            "hard_rules": [
+                "先看参考图，再看候选结果和 Rubrics。",
+                "只能依据可见证据判断，不能脑补业务。",
+                "看不清默认不满足，除非其他视角能证明。",
+                "Rubrics 合理性只看标准本身是否围绕参考对象、结构、颜色材质展开。",
+                "rubrics_reasonable=true 时 rubrics_reasonable_reason 必须填写“合理”。",
+                "rubrics_reasonable=false 时 rubrics_reasonable_reason 简短说明不合理原因。",
+                "S1 形体、S2 结构召回、A 材质与颜色三维度独立给 1-5 分。",
+                "每个不满足 Rubric 必须给具体原因。",
+            ],
+        },
+        "current_item_input": {
+            "item_id": str(context.get("item_id") or ""),
+            "uid": str(context.get("uid") or ""),
+            "reference_image": reference_image,
+            "candidate_images": candidate_images,
+            "rubrics": rubrics,
+            "task_text": str(context.get("task_text") or ""),
+            "extra_context": context.get("extra_context") if isinstance(context.get("extra_context"), dict) else {},
+        },
+        "output_schema": {
+            "task_type": TASK_TYPE_3D_RUBRIC_EVAL,
+            "rubrics_reasonable": "boolean",
+            "rubrics_reasonable_reason": "rubrics_reasonable=true 时固定填“合理”；rubrics_reasonable=false 时简短说明不合理原因",
+            "rubric_items": [{"rubric_id": "字符串", "verdict": "satisfied 或 unsatisfied", "reason": "不满足时必填"}],
+            "dimension_scores": {
+                "S1": {"score": "1-5 整数", "reason": "形体评分原因"},
+                "S2": {"score": "1-5 整数", "reason": "结构召回评分原因"},
+                "A": {"score": "1-5 整数", "reason": "材质与颜色评分原因"},
+            },
+            "discard": {"selected": "boolean", "reason": "废弃原因"},
+            "evidence_summary": "用一句话概括关键可见证据",
+            "confidence": "high/medium/low",
+        },
+    }
+    user_text = (
+        "请按 3D 标注手册和当前 Rubrics 判断这道题。下面 JSON 是输入上下文，不是输出模板；禁止复述 manual_rules、current_item_input 或 output_schema。\n"
+        "你必须只输出一个 JSON 对象，字段必须符合 output_schema；每个 unsatisfied Rubric 必须写具体原因；S1/S2/A 都必须有 1-5 分和原因。\n"
+        + json.dumps(task_input, ensure_ascii=False)
+    )
+    content: list[dict[str, Any]] = [{"type": "text", "text": user_text}]
+    if reference_image:
+        content.append({"type": "image_url", "image_url": {"url": _prepare_research_chart_image_for_ai(reference_image)}})
+    for item in candidate_images[:6]:
+        url = str(item.get("url") or "").strip() if isinstance(item, dict) else ""
+        if url:
+            content.append({"type": "image_url", "image_url": {"url": _prepare_research_chart_image_for_ai(url)}})
+    return [
+        {"role": "system", "content": "你是 AIDP 3D Rubric 标注 AI。只根据图片和 Rubrics 输出严格 JSON，不允许提交、暂存、领取题目或修改系统。"},
+        {"role": "user", "content": content},
+    ]
+
+
+def _extract_3d_candidate_images(context: dict[str, Any]) -> list[dict[str, str]]:
+    value = context.get("candidate_images")
+    if isinstance(value, list):
+        result = []
+        for index, item in enumerate(value, start=1):
+            if isinstance(item, dict):
+                url = str(item.get("url") or item.get("image_url") or "").strip()
+                label = str(item.get("label") or item.get("name") or f"candidate_{index}").strip()
+            else:
+                url = str(item or "").strip()
+                label = f"candidate_{index}"
+            if url:
+                result.append({"label": label, "url": url})
+        if result:
+            return result
+    model_image = str(context.get("model_image") or "").strip()
+    return [{"label": "candidate", "url": model_image}] if model_image else []
+
+
+def _validate_3d_rubric_question_context(context: dict[str, Any]) -> None:
+    source_mode = str(context.get("source_mode") or "").strip()
+    item_id = str(context.get("item_id") or "").strip()
+    reference_image = str(context.get("reference_image") or context.get("image_gt") or "").strip()
+    candidate_images = _extract_3d_candidate_images(context)
+    rubrics = context.get("rubrics") if isinstance(context.get("rubrics"), list) else []
+    if not source_mode.startswith("live_"):
+        raise TaskAbilityFlowError("3D 真实题上下文必须来自 live 题面读取，不能使用草稿或本地空样本生成审核件。")
+    if not item_id:
+        raise TaskAbilityFlowError("3D 真实题上下文缺少 item_id。")
+    if not reference_image:
+        raise TaskAbilityFlowError("3D 真实题上下文缺少参考图。")
+    if not candidate_images:
+        raise TaskAbilityFlowError("3D 真实题上下文缺少候选图。")
+    if not rubrics:
+        raise TaskAbilityFlowError("3D 真实题上下文缺少 Rubrics。")
+    for index, item in enumerate(rubrics, start=1):
+        if not isinstance(item, dict):
+            raise TaskAbilityFlowError(f"3D Rubric {index} 格式无效。")
+        rubric_id = str(item.get("rubric_id") or item.get("id") or index).strip()
+        question = str(item.get("question") or item.get("text") or "").strip()
+        pass_criterion = str(item.get("pass_criterion") or "").strip()
+        fail_criterion = str(item.get("fail_criterion") or "").strip()
+        if not question or not pass_criterion or not fail_criterion:
+            raise TaskAbilityFlowError(f"3D Rubric {rubric_id} 缺少题目或判定标准。")
 
 
 def _ensure_live_question_context_for_temp_save(context: dict[str, Any]) -> None:
@@ -2688,12 +3516,21 @@ def _build_temp_draft_payload(store_path: Path, draft: dict[str, Any], context: 
     item_id = str(context.get("item_id") or "")
     if payload:
         answers = payload.get("AuditAnswers") if isinstance(payload.get("AuditAnswers"), list) else []
-        answer = answers[0] if answers and isinstance(answers[0], dict) else {}
+        if not answers or not isinstance(answers[0], dict):
+            raise TaskAbilityFlowError("录制暂存 payload 缺少 AuditAnswers，不能写入真实做题界面。请重新录制包含暂存请求和成功响应的学习包。")
+        answer = answers[0]
         if item_id:
             answer["ItemID"] = item_id
-        content = _load_json_text(str(answer.get("Content") or "{}"))
+        content_text = answer.get("Content")
+        if not isinstance(content_text, str) or not content_text.strip():
+            raise TaskAbilityFlowError("录制暂存 payload 的 Content 不是合法 JSON 对象，不能写入真实做题界面。")
+        try:
+            content = json.loads(content_text)
+        except json.JSONDecodeError as exc:
+            raise TaskAbilityFlowError("录制暂存 payload 的 Content 不是合法 JSON 对象，不能写入真实做题界面。") from exc
         if not isinstance(content, dict):
-            content = {}
+            raise TaskAbilityFlowError("录制暂存 payload 的 Content 不是合法 JSON 对象，不能写入真实做题界面。")
+        _validate_recorded_temp_content_shape(content, answer, context, decision)
         if item_id:
             content["itemID"] = item_id
         _merge_context_into_content(content, context)
@@ -2702,8 +3539,18 @@ def _build_temp_draft_payload(store_path: Path, draft: dict[str, Any], context: 
         answer.setdefault("ControlData", json.dumps({"Discard": False, "extraAnswer": []}, ensure_ascii=False, separators=(",", ":")))
         return payload
 
+    raise TaskAbilityFlowError("未找到经过录制验证的暂存 payload，不能猜造 SubmitTempItemAnswer 写入真实做题界面。请先录制并选择学习包或暂存证据。")
+
+
+def _build_temp_draft_payload_debug_preview(store_path: Path, draft: dict[str, Any], context: dict[str, Any], decision: dict[str, str]) -> dict[str, Any]:
+    try:
+        return _build_temp_draft_payload(store_path, draft, context, decision)
+    except TaskAbilityFlowError as exc:
+        if "未找到经过录制验证的暂存 payload" not in str(exc):
+            raise
+    item_id = str(context.get("item_id") or "").strip()
     if not item_id:
-        raise TaskAbilityFlowError("真实题暂存缺少 ItemID，不能写入做题界面。")
+        raise TaskAbilityFlowError("payload 调试缺少 ItemID，不能生成本地预览。")
     content = {
         "item": {
             "uid": str(context.get("uid") or ""),
@@ -2716,6 +3563,7 @@ def _build_temp_draft_payload(store_path: Path, draft: dict[str, Any], context: 
         "itemID": item_id,
         "isAbandoned": False,
     }
+    _merge_context_into_content(content, context)
     _apply_decision_to_content(content, decision)
     return {
         "AuditAnswers": [
@@ -2727,7 +3575,7 @@ def _build_temp_draft_payload(store_path: Path, draft: dict[str, Any], context: 
         ],
         "NodeID": str(context.get("node_id") or draft.get("node_id") or "1"),
         "StagingTime": "604800",
-        "TaskID": str(draft.get("task_id") or ""),
+        "TaskID": str(context.get("task_id") or draft.get("task_id") or ""),
     }
 
 
@@ -2736,7 +3584,71 @@ def _load_recorded_temp_payload(store_path: Path, draft: dict[str, Any]) -> dict
     evidence_path = store_path.parent / f"research-chart-{task_id}" / "research-chart-dry-run-payload.json"
     data = _load_json(evidence_path)
     payload = data.get("payload") if isinstance(data, dict) else {}
+    if payload and not isinstance(data.get("temp_save_verification"), dict):
+        raise TaskAbilityFlowError("录制暂存 payload 缺少显式 temp_save_verification，不能写入真实做题界面。请重新录制包含成功暂存和页面保留证据的学习包。")
+    if payload and not _recorded_temp_payload_verified(data):
+        raise TaskAbilityFlowError("录制暂存 payload 缺少暂存成功响应和持久化证据，不能写入真实做题界面。请重新录制包含成功暂存和页面保留证据的学习包。")
     return json.loads(json.dumps(payload, ensure_ascii=False)) if isinstance(payload, dict) else {}
+
+
+def _validate_recorded_temp_content_shape(content: dict[str, Any], answer: dict[str, Any], context: dict[str, Any], decision: dict[str, Any]) -> None:
+    data = content.get("data")
+    item = content.get("item")
+    data_map = content.get("dataMap")
+    if not isinstance(item, dict) or not isinstance(data, dict) or not isinstance(data_map, dict):
+        raise TaskAbilityFlowError("录制暂存 payload 的 Content 缺少已录制字段结构，不能猜造内部表单结构。请重新录制完整暂存请求。")
+    label_score = data.get("label_sorce")
+    label_reason = data.get("label_remark")
+    if not isinstance(label_score, dict) or not isinstance(label_reason, dict):
+        raise TaskAbilityFlowError("录制暂存 payload 的 Content 缺少已录制字段结构，不能猜造内部表单结构。请重新录制完整暂存请求。")
+    control_data = answer.get("ControlData")
+    if not isinstance(control_data, str) or not control_data.strip():
+        raise TaskAbilityFlowError("录制暂存 payload 缺少已录制 ControlData，不能猜造内部表单结构。请重新录制完整暂存请求。")
+    missing: list[str] = []
+    if "itemID" not in content:
+        missing.append("Content.itemID")
+    for key in ("uid", "image_gt"):
+        if str(context.get(key) or "").strip() and key not in item:
+            missing.append(f"Content.item.{key}")
+    for model_key, _model_url in _extract_research_chart_model_entries(context):
+        if model_key not in item:
+            missing.append(f"Content.item.{model_key}")
+        bon_key = f"{model_key}_bon_id"
+        if context.get(bon_key) not in (None, "") and bon_key not in item:
+            missing.append(f"Content.item.{bon_key}")
+    for key in ("discard", "discard_type", "discard_remark", "checkRemark"):
+        if key not in data:
+            missing.append(f"Content.data.{key}")
+    for model_key in _decision_answer_model_keys(decision):
+        if model_key not in label_score:
+            missing.append(f"Content.data.label_sorce.{model_key}")
+        if model_key not in label_reason:
+            missing.append(f"Content.data.label_remark.{model_key}")
+    if missing:
+        raise TaskAbilityFlowError("录制暂存 payload 缺少已录制答案字段，不能猜造内部表单结构：" + "、".join(missing))
+
+
+def _decision_answer_model_keys(decision: dict[str, Any]) -> list[str]:
+    model_scores = decision.get("model_scores") if isinstance(decision.get("model_scores"), dict) else {}
+    if model_scores:
+        return [str(key) for key, value in model_scores.items() if isinstance(value, dict) and str(key)]
+    return ["model_image"]
+
+
+def _recorded_temp_payload_verified(data: dict[str, Any]) -> bool:
+    if not isinstance(data, dict):
+        return False
+    verification = data.get("temp_save_verification")
+    if not isinstance(verification, dict):
+        return False
+    status = verification.get("base_resp_status_code")
+    saved_to_task_ui = bool(
+        verification.get("saved_to_task_ui")
+        or verification.get("persisted_to_task_ui")
+        or verification.get("readback_ok")
+    )
+    submits_remote = bool(verification.get("submits_remote"))
+    return status in (0, "0") and saved_to_task_ui and not submits_remote
 
 
 def _merge_context_into_content(content: dict[str, Any], context: dict[str, Any]) -> None:
@@ -2918,7 +3830,7 @@ def _temp_save_succeeded(result: Optional[dict[str, Any]]) -> bool:
     if not isinstance(result, dict) or not result.get("ok"):
         return False
     status = result.get("base_resp_status_code")
-    return status in (0, "0", None)
+    return status in (0, "0")
 
 
 def _base_resp_status_code(response: Any) -> Optional[int]:
@@ -2941,6 +3853,21 @@ def _write_review_artifact(review_root: Path, artifact: dict[str, Any]) -> Path:
 def _default_review_root(store_path: Path, draft: dict[str, Any]) -> Path:
     task_id = str(draft.get("task_id") or "unknown-task")
     return store_path.parent / f"research-chart-{task_id}" / "real-no-submit-reviews"
+
+
+def _default_live_http_review_root(store_path: Path, task_id: str) -> Path:
+    try:
+        draft = _find_latest_draft_by_task_id(_load_items_from_path(store_path), task_id)
+    except TaskAbilityFlowError:
+        draft = {"task_id": task_id}
+    if _is_3d_rubric_draft(draft):
+        return _default_3d_rubric_review_root(store_path, draft)
+    return _default_review_root(store_path, draft)
+
+
+def _default_3d_rubric_review_root(store_path: Path, draft: dict[str, Any]) -> Path:
+    task_id = str(draft.get("task_id") or "unknown-task")
+    return store_path.parent / f"3d-rubric-{task_id}" / "real-no-submit-reviews"
 
 
 def _production_state_path() -> Path:

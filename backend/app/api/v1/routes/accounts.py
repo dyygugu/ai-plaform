@@ -19,6 +19,7 @@ from app.services.production_account_refresh_service import refresh_production_a
 from app.services.account_coverage_service import build_account_coverage_summary, create_account_coverage_baseline
 from app.services.audit_service import write_audit
 from app.services.aidp_username_service import refresh_account_usernames
+from app.services.task_service import sync_task_catalog_from_production_accounts
 
 router = APIRouter(prefix="/accounts", tags=["accounts"])
 
@@ -36,7 +37,10 @@ def refresh_real_usernames(db: Session = Depends(get_db)) -> AccountUsernameRefr
 @router.post("/refresh-production", response_model=ProductionAccountRefreshResponse)
 def refresh_accounts_production_data(db: Session = Depends(get_db)) -> ProductionAccountRefreshResponse:
     result = refresh_production_accounts(display_names=_db_display_names(db))
+    synced = sync_task_catalog_from_production_accounts(db, build_production_dashboard(db).accounts)
     write_audit(db, event_type="production_accounts_refresh", message=result.message, target_type="account")
+    if synced:
+        write_audit(db, event_type="task_catalog_sync_from_production", message=f"Synced {len(synced)} account task rows from production refresh", target_type="task")
     db.commit()
     return result
 
@@ -67,7 +71,10 @@ def refresh_account_production_data(user_id: str, db: Session = Depends(get_db))
         result = refresh_production_account_by_user_id(user_id, display_names=_db_display_names(db))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    synced = sync_task_catalog_from_production_accounts(db, build_production_dashboard(db).accounts)
     write_audit(db, event_type="production_account_refresh", message=result.message, target_type="account", target_id=user_id)
+    if synced:
+        write_audit(db, event_type="task_catalog_sync_from_production", message=f"Synced {len(synced)} account task rows from account refresh", target_type="task", target_id=user_id)
     db.commit()
     return result
 

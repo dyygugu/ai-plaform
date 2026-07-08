@@ -1,3 +1,4 @@
+import requests
 from fastapi import APIRouter, HTTPException
 
 from app.schemas.submitted_history import (
@@ -21,8 +22,14 @@ router = APIRouter(prefix="/tasks/{task_id}", tags=["submitted-history"])
 def sync_submitted_history(task_id: str, payload: SubmittedHistorySyncRequest = SubmittedHistorySyncRequest()) -> SubmittedHistorySyncResponse:
     try:
         return service.sync_submitted_history(task_id, account_id=payload.account_id, node_id=payload.node_id, force=payload.force)
-    except (FileNotFoundError, ValueError) as exc:
+    except FileNotFoundError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except requests.RequestException as exc:
+        raise HTTPException(status_code=502, detail=f"同步已提交样本失败：上游接口请求失败：{exc}") from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=f"同步已提交样本失败：{exc}") from exc
 
 
 @router.get("/submitted-history/stats", response_model=SubmittedHistoryStatsResponse)

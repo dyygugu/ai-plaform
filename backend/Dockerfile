@@ -12,4 +12,4 @@ COPY backend/app /app/app
 COPY frontend/dist /app/frontend_dist
 
 EXPOSE 8787
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8787"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8787", "--no-proxy-headers"]
